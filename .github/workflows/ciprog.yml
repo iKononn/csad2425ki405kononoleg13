@@ -4,85 +4,49 @@ on:
   push:
     branches:
       - develop
-      - feature/develop/task2
+      - feature/develop/task3
   pull_request:
     branches:
       - develop
-      
+
 jobs:
-  windows:
+  b_client:
     runs-on: windows-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4  
+
       - name: Set up Visual Studio
         uses: microsoft/setup-msbuild@v2  
         with:
           vs-version: '16.0'
+
       - name: Restore NuGet packages
-        run: nuget restore ClientProg/ClientProg.sln
+        run: nuget restore src/client/client.sln
+
       - name: Build solution
         run: |
-          msbuild ClientProg/ClientProg.sln /p:Configuration=Release /p:Platform="x64" /p:OutputPath="ClientProg/build"
+          msbuild src/client/client.sln /p:Configuration=Release /p:Platform="x64" /p:OutputPath="src/client/build"
+
       - name: Upload Windows binaries
         uses: actions/upload-artifact@v4
         with:
-          name: ClientProg
-          path: ClientProg/x64/Release/*.exe
-  
-  arduino:
-    runs-on: ubuntu-latest  
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4 
-      - name: Set up Arduino CLI
-        run: |
-          wget https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Linux_64bit.tar.gz
-          tar -xzf arduino-cli_latest_Linux_64bit.tar.gz
-          sudo mv arduino-cli /usr/local/bin/
-          arduino-cli config init
-      - name: Add Arduino package URL
-        run: |
-          arduino-cli config set board_manager.additional_urls https://downloads.arduino.cc/packages/package_index.json
-      - name: Install Arduino core
-        run: |
-          arduino-cli core update-index
-          arduino-cli core install arduino:avr
-      - name: Compile Arduino Sketch for Uno
-        run: |
-          mkdir -p build
-          arduino-cli compile --fqbn arduino:avr:uno --output-dir build ServerProg/ServerProg.ino
-      - name: Upload Arduino binaries
-        uses: actions/upload-artifact@v4 
-        with:
-          name: Arduino
-          path: build/*.hex
-          
-  test:
+          name: client-exe
+          path: src/client/x64/Release/*.exe
+
+  b_server:
     runs-on: windows-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4 
-      - name: Set up Visual Studio
-        uses: microsoft/setup-msbuild@v2
-        with:
-          vs-version: '16.0'
-      - name: Restore NuGet packages
-        run: nuget restore Test/Test.sln
-      - name: Build the solution
+
+      - name: Run hw-script.ps1
+        shell: pwsh
         run: |
-            msbuild Test/Test.sln /p:Configuration="Release" /p:Platform="x64" /p:OutputPath="Test/build"
-      - name: Run unit tests
-        run: |
-          $exePath = Get-ChildItem Test/x64/Release/*.exe | Select-Object -First 1
-          & $exePath.FullName --gtest_output=xml:TestResultFile.xml
-      - name: Upload Windows binaries
-        uses: actions/upload-artifact@v4
+            .\ci\hw.ps1
+
+      - name: Upload Arduino binaries
+        uses: actions/upload-artifact@v4 
         with:
-          name: Test
-          path: Test/x64/Release/*.exe
-      - name: Upload test results
-        uses: actions/upload-artifact@v4
-        with:
-          name: TestResultFile
-          path: TestResultFile.xml
+          name: server-hex
+          path: ./ci/build/server/server.ino.hex
