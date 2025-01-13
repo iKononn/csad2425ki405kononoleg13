@@ -1,0 +1,112 @@
+﻿<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+	<head>
+        <meta charset="utf-8"/>
+	    <title>test.cpp</title>
+	    <link href="../../third-party/google-code-prettify/prettify-CppCoverage.css" type="text/css" rel="stylesheet" />
+	    <script type="text/javascript" src="../../third-party/google-code-prettify/prettify.js"></script>
+	</head>
+    <body onload="prettyPrint()">
+        <h4></h4>
+        <pre class="prettyprint lang-cpp linenums">
+#include "pch.h"
+
+#include &lt;gtest/gtest.h&gt;
+#include "SerialPort.h"
+#include &lt;string&gt;
+
+using namespace std;
+<span style = "background-color:#dfd">wstring comport;</span>
+DWORD baudRate;
+
+<span style = "background-color:#dfd">string sendReceiveData(const string&amp; inputData) {
+    HANDLE hSerial = openSerialPort(comport, baudRate);
+    if (hSerial == INVALID_HANDLE_VALUE) {</span>
+<span style = "background-color:#fdd">        throw runtime_error("Error opening serial port");</span>
+    }
+<span style = "background-color:#dfd">    sendMessage(hSerial, inputData);
+    string response = readMessage(hSerial);
+    CloseHandle(hSerial);
+    return response;
+}</span>
+
+<span style = "background-color:#dfd">TEST(ServerTest, TestInitialGameState) {
+    string inputXml = "&lt;?xml version=\"1.0\" encoding=\"utf-8\"?&gt;&lt;GameState&gt;&lt;Player&gt;O&lt;/Player&gt;&lt;GameType&gt;Man vs AI&lt;/GameType&gt;&lt;Board&gt;&lt;Row&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;/Row&gt;&lt;Row&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;/Row&gt;&lt;Row&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;/Row&gt;&lt;/Board&gt;&lt;Status&gt;Start&lt;/Status&gt;&lt;/GameState&gt;";
+    string response = sendReceiveData(inputXml);
+    EXPECT_TRUE(response.find("&lt;Status&gt;NextMove&lt;/Status&gt;") != string::npos);
+    EXPECT_TRUE(response.find("&lt;Player&gt;O&lt;/Player&gt;") != string::npos);
+    EXPECT_TRUE(response.find("&lt;GameType&gt;Man vs AI&lt;/GameType&gt;") != string::npos);
+}</span>
+
+<span style = "background-color:#dfd">TEST(ServerTest, TestGameStateUpdate) {
+    string inputXml = "&lt;?xml version=\"1.0\" encoding=\"utf-8\"?&gt;&lt;GameState&gt;&lt;Player&gt;O&lt;/Player&gt;&lt;GameType&gt;AI vs AI&lt;/GameType&gt;&lt;Board&gt;&lt;Row&gt;&lt;Cell&gt;O&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;X&lt;/Cell&gt;&lt;/Row&gt;&lt;Row&gt;&lt;Cell&gt;O&lt;/Cell&gt;&lt;Cell&gt;X&lt;/Cell&gt;&lt;Cell&gt;X&lt;/Cell&gt;&lt;/Row&gt;&lt;Row&gt;&lt;Cell&gt;X&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;O&lt;/Cell&gt;&lt;/Row&gt;&lt;/Board&gt;&lt;Status&gt;NextMove&lt;/Status&gt;&lt;/GameState&gt;";
+    string response = sendReceiveData(inputXml);
+    EXPECT_TRUE(response.find("&lt;Status&gt;Win X&lt;/Status&gt;") != string::npos);
+}</span>
+
+<span style = "background-color:#dfd">TEST(ServerTest, TestFirstMoveGameState) {
+    string inputXml = "&lt;?xml version=\"1.0\" encoding=\"utf - 8\"?&gt;&lt;GameState&gt;&lt;Player&gt;O&lt;/Player&gt;&lt;GameType&gt;Man vs Man&lt;/GameType&gt;&lt;Board&gt;&lt;Row&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;/Row&gt;&lt;Row&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;X&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;/Row&gt;&lt;Row&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;/Row&gt;&lt;/Board&gt;&lt;Status&gt;NextMove&lt;/Status&gt;&lt;/GameState&gt;";
+    string response = sendReceiveData(inputXml);
+    EXPECT_TRUE(response.find("&lt;Status&gt;NextMove&lt;/Status&gt;") != string::npos);
+}</span>
+
+<span style = "background-color:#dfd">TEST(ServerTest, TestDrawGameState) {
+    string inputXml = "&lt;?xml version=\"1.0\" encoding=\"utf-8\"?&gt;&lt;GameState&gt;&lt;Player&gt;O&lt;/Player&gt;&lt;GameType&gt;AI vs AI&lt;/GameType&gt;&lt;Board&gt;&lt;Row&gt;&lt;Cell&gt;X&lt;/Cell&gt;&lt;Cell&gt;O&lt;/Cell&gt;&lt;Cell&gt;X&lt;/Cell&gt;&lt;/Row&gt;&lt;Row&gt;&lt;Cell&gt;O&lt;/Cell&gt;&lt;Cell&gt;X&lt;/Cell&gt;&lt;Cell&gt;O&lt;/Cell&gt;&lt;/Row&gt;&lt;Row&gt;&lt;Cell&gt;X&lt;/Cell&gt;&lt;Cell&gt;O&lt;/Cell&gt;&lt;Cell&gt;X&lt;/Cell&gt;&lt;/Row&gt;&lt;/Board&gt;&lt;Status&gt;Draw&lt;/Status&gt;&lt;/GameState&gt;";
+    string response = sendReceiveData(inputXml);
+    EXPECT_TRUE(response.find("&lt;Status&gt;Draw&lt;/Status&gt;") != string::npos);
+    EXPECT_TRUE(response.find("&lt;Cell&gt;X&lt;/Cell&gt;") != string::npos);
+    EXPECT_TRUE(response.find("&lt;Cell&gt;O&lt;/Cell&gt;") != string::npos);
+    EXPECT_TRUE(response.find("&lt;Cell&gt;_&lt;/Cell&gt;") == string::npos);
+}</span>
+
+<span style = "background-color:#dfd">TEST(ServerTest, TestPlayerXWin) {
+    string inputXml = "&lt;?xml version=\"1.0\" encoding=\"utf-8\"?&gt;&lt;GameState&gt;&lt;Player&gt;O&lt;/Player&gt;&lt;GameType&gt;AI vs AI&lt;/GameType&gt;&lt;Board&gt;&lt;Row&gt;&lt;Cell&gt;X&lt;/Cell&gt;&lt;Cell&gt;X&lt;/Cell&gt;&lt;Cell&gt;X&lt;/Cell&gt;&lt;/Row&gt;&lt;Row&gt;&lt;Cell&gt;O&lt;/Cell&gt;&lt;Cell&gt;O&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;/Row&gt;&lt;Row&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;/Row&gt;&lt;/Board&gt;&lt;Status&gt;Win X&lt;/Status&gt;&lt;/GameState&gt;";
+    string response = sendReceiveData(inputXml);
+    EXPECT_TRUE(response.find("&lt;Status&gt;Win X&lt;/Status&gt;") != string::npos);
+    EXPECT_TRUE(response.find("&lt;Cell&gt;X&lt;/Cell&gt;") != string::npos);
+    EXPECT_TRUE(response.find("&lt;Cell&gt;O&lt;/Cell&gt;") != string::npos);
+    EXPECT_TRUE(response.find("&lt;Cell&gt;X&lt;/Cell&gt;&lt;Cell&gt;X&lt;/Cell&gt;&lt;Cell&gt;X&lt;/Cell&gt;") != string::npos);
+}</span>
+
+<span style = "background-color:#dfd">TEST(ServerTest, TestTurnSwitching) {
+    string inputXml = "&lt;?xml version=\"1.0\" encoding=\"utf-8\"?&gt;&lt;GameState&gt;&lt;Player&gt;X&lt;/Player&gt;&lt;GameType&gt;AI vs Man&lt;/GameType&gt;&lt;Board&gt;&lt;Row&gt;&lt;Cell&gt;X&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;/Row&gt;&lt;Row&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;/Row&gt;&lt;Row&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;Cell&gt;_&lt;/Cell&gt;&lt;/Row&gt;&lt;/Board&gt;&lt;Status&gt;NextMove&lt;/Status&gt;&lt;/GameState&gt;";
+    string response = sendReceiveData(inputXml);
+    EXPECT_TRUE(response.find("&lt;Player&gt;X&lt;/Player&gt;") != string::npos);
+    EXPECT_TRUE(response.find("&lt;Status&gt;NextMove&lt;/Status&gt;") != string::npos);
+    EXPECT_TRUE(response.find("&lt;Cell&gt;X&lt;/Cell&gt;") != string::npos);
+}</span>
+
+<span style = "background-color:#dfd">int main(int argc, char** argv) {</span>
+    int result;
+<span style = "background-color:#dfd">    ::testing::InitGoogleTest(&amp;argc, argv);
+    if (argc &gt; 2) {
+        comport = wstring(argv[1], argv[1] + strlen(argv[1]));
+        baudRate = stoi(argv[2]);
+        cout &lt;&lt; endl &lt;&lt; "--------------------------------------------------" &lt;&lt; endl;
+        cout &lt;&lt; "Using COM-port: " &lt;&lt; argv[1] &lt;&lt; " with baud rate: " &lt;&lt; baudRate &lt;&lt; "...";
+        cout &lt;&lt; endl &lt;&lt; "--------------------------------------------------" &lt;&lt; endl;
+        result = RUN_ALL_TESTS();
+    }</span>
+    else {
+<span style = "background-color:#fdd">        cout &lt;&lt; endl &lt;&lt; "--------------------------------------------------" &lt;&lt; endl;
+        wcout &lt;&lt; L"No COM-port or BAUD RATE specified...";
+        cout &lt;&lt; endl &lt;&lt; "--------------------------------------------------" &lt;&lt; endl;
+        result = -1;</span>
+    }
+<span style = "background-color:#dfd">    return result;
+}</span></pre>
+        <hr />
+        <table width="100%">
+            <thead>
+                <tr>
+                    <th align="center">
+                        <small>Generated by</small>
+                        <a href="https://github.com/OpenCppCoverage/OpenCppCoverage/releases">
+                            <strong>OpenCppCoverage (Version: 0.9.9.0)</strong>
+                        </a>
+                    </th>
+                </tr>
+            </thead>
+        </table>
+    </body>
+</html>
