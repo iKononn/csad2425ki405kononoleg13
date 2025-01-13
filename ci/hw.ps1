@@ -1,7 +1,3 @@
-
-
-
-
 param (
     [string]$port,
     [string]$speed

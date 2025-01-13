@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - develop
-      - feature/develop/task4
+      - feature/develop/task5
   pull_request:
     branches:
       - develop
@@ -73,3 +73,34 @@ jobs:
         with:
           name: doxy-file
           path: ./ci/docs/Doxyfile
+
+  b_test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4  
+
+      - name: Set up Visual Studio
+        uses: microsoft/setup-msbuild@v2  
+        with:
+          vs-version: '16.0'
+
+      - name: Restore NuGet packages
+        run: nuget restore tests/test_client/test_client.sln
+
+      - name: Run tests-script.ps1
+        shell: pwsh
+        run: |
+            .\ci\tests.ps1
+
+      - name: Upload test result
+        uses: actions/upload-artifact@v4 
+        with:
+          name: client-test-result
+          path: .\ci\test_result\client\TestResultClient.html
+
+      - name: Upload test code coverage
+        uses: actions/upload-artifact@v4 
+        with:
+          name: client-coverage-report
+          path: .\ci\test_result\coverage_report_client

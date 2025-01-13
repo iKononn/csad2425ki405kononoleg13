@@ -1,0 +1,267 @@
+﻿<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+	<head>
+        <meta charset="utf-8"/>
+	    <title>GameLogic.cpp</title>
+	    <link href="../../third-party/google-code-prettify/prettify-CppCoverage.css" type="text/css" rel="stylesheet" />
+	    <script type="text/javascript" src="../../third-party/google-code-prettify/prettify.js"></script>
+	</head>
+    <body onload="prettyPrint()">
+        <h4></h4>
+        <pre class="prettyprint lang-cpp linenums">
+#include "GameLogic.h"
+
+/**
+ * @brief Parses a game state XML file and extracts game data.
+ *
+ * This function loads a specified XML file and extracts the game state, including the first player,
+ * game type, board state, and game status. The parsed values are stored in the provided references.
+ *
+ * @param filename The name of the XML file to load.
+ * @param firstPlayer Reference to a character where the first player ('X' or 'O') will be stored.
+ * @param gameMode Reference to a string where the game mode (e.g., "Man vs Man") will be stored.
+ * @param board Reference to a 2D vector of characters representing the board state.
+ * @param gameStatus Reference to a string where the game status (e.g., "Start") will be stored.
+ */
+<span style = "background-color:#dfd">void parseGameStateXML(const string&amp; filename, char&amp; firstPlayer, string&amp; gameMode, vector&lt;vector&lt;char&gt;&gt;&amp; board, string&amp; gameStatus) {
+    tinyxml2::XMLDocument doc;
+    XMLError eResult = doc.LoadFile(filename.c_str());
+    if (eResult != XML_SUCCESS) {
+        cerr &lt;&lt; "Error loading XML file: " &lt;&lt; doc.ErrorStr() &lt;&lt; endl;
+        return;</span>
+    }
+<span style = "background-color:#dfd">    XMLNode* root = doc.FirstChildElement("GameState");
+    if (root == nullptr) {</span>
+<span style = "background-color:#fdd">        cerr &lt;&lt; "No &lt;GameState&gt; element found!" &lt;&lt; endl;
+        return;</span>
+    }
+<span style = "background-color:#dfd">    XMLElement* playerElement = root-&gt;FirstChildElement("Player");
+    if (playerElement != nullptr) {
+        const char* playerText = playerElement-&gt;GetText();
+        if (playerText != nullptr) {
+            firstPlayer = playerText[0];</span>
+        }
+    }
+<span style = "background-color:#dfd">    XMLElement* gameTypeElement = root-&gt;FirstChildElement("GameType");
+    if (gameTypeElement != nullptr) {
+        const char* gameTypeText = gameTypeElement-&gt;GetText();
+        if (gameTypeText != nullptr) {
+            gameMode = gameTypeText;</span>
+        }
+    }
+<span style = "background-color:#dfd">    XMLElement* boardElement = root-&gt;FirstChildElement("Board");
+    if (boardElement != nullptr) {
+        int row = 0;
+        for (XMLElement* rowElement = boardElement-&gt;FirstChildElement("Row"); rowElement != nullptr; rowElement = rowElement-&gt;NextSiblingElement("Row")) {
+            int col = 0;
+            for (XMLElement* cellElement = rowElement-&gt;FirstChildElement("Cell"); cellElement != nullptr; cellElement = cellElement-&gt;NextSiblingElement("Cell")) {
+                const char* cellText = cellElement-&gt;GetText();
+                if (cellText != nullptr &amp;&amp; col &lt; 3) {
+                    board[row][col] = cellText[0];</span>
+                }
+<span style = "background-color:#dfd">                col++;
+            }
+            row++;
+        }</span>
+    }
+<span style = "background-color:#dfd">    XMLElement* statusElement = root-&gt;FirstChildElement("Status");
+    if (statusElement != nullptr) {
+        const char* statusText = statusElement-&gt;GetText();
+        if (statusText != nullptr) {
+            gameStatus = statusText;</span>
+        }
+    }
+<span style = "background-color:#dfd">}</span>
+
+/**
+ * @brief Updates the game state in the XML file.
+ *
+ * This function writes the current player, game type, and board state to an XML file. It creates or
+ * overwrites the "game_state.xml" file with the updated information.
+ *
+ * @param player The current player ('X' or 'O').
+ * @param gameType The current game type (e.g., "Man vs Man").
+ * @param board A 2D vector representing the current state of the game board.
+ */
+<span style = "background-color:#dfd">void updateXML(const string&amp; player, const string&amp; gameType, const vector&lt;vector&lt;char&gt;&gt;&amp; board) {
+    ofstream file("game_state.xml");
+    file &lt;&lt; "&lt;GameState&gt;&lt;Player&gt;" &lt;&lt; player &lt;&lt; "&lt;/Player&gt;&lt;GameType&gt;" &lt;&lt; gameType &lt;&lt; "&lt;/GameType&gt;&lt;Board&gt;";
+    for (int i = 0; i &lt; 3; ++i) {
+        file &lt;&lt; "&lt;Row&gt;";
+        for (int j = 0; j &lt; 3; ++j) {
+            file &lt;&lt; "&lt;Cell&gt;" &lt;&lt; board[i][j] &lt;&lt; "&lt;/Cell&gt;";
+        }
+        file &lt;&lt; "&lt;/Row&gt;";
+    }
+    file &lt;&lt; "&lt;/Board&gt;&lt;Status&gt;Start&lt;/Status&gt;&lt;/GameState&gt;\n";
+    file.close();
+}</span>
+
+/**
+ * @brief Creates a new game state XML file with initial values.
+ *
+ * This function generates a new XML file with the provided first player, game type, and board state.
+ * The game status is set to "Start".
+ *
+ * @param filename The name of the XML file to create.
+ * @param firstPlayer The first player ('X' or 'O').
+ * @param gameMode The game type (e.g., "Man vs Man").
+ * @param board A 2D vector representing the initial state of the game board.
+ */
+<span style = "background-color:#dfd">void createGameStateXML(const string&amp; filename, char firstPlayer, const string&amp; gameMode, const vector&lt;vector&lt;char&gt;&gt;&amp; board) {
+    ofstream file(filename);
+    if (file.is_open()) {
+        file &lt;&lt; "&lt;GameState&gt;&lt;Player&gt;" &lt;&lt; firstPlayer &lt;&lt; "&lt;/Player&gt;"</span>
+            &lt;&lt; "&lt;GameType&gt;" &lt;&lt; gameMode &lt;&lt; "&lt;/GameType&gt;"
+            &lt;&lt; "&lt;Board&gt;";
+<span style = "background-color:#dfd">        for (const auto&amp; row : board) {
+            file &lt;&lt; "&lt;Row&gt;";
+            for (const auto&amp; cell : row) {
+                file &lt;&lt; "&lt;Cell&gt;" &lt;&lt; cell &lt;&lt; "&lt;/Cell&gt;";
+            }
+            file &lt;&lt; "&lt;/Row&gt;";
+        }
+        file &lt;&lt; "&lt;/Board&gt;&lt;Status&gt;Start&lt;/Status&gt;&lt;/GameState&gt;\n";
+        file.close();
+    }</span>
+    else {
+<span style = "background-color:#fdd">        cerr &lt;&lt; "Failed to create XML file!" &lt;&lt; endl;</span>
+    }
+<span style = "background-color:#dfd">}</span>
+
+/**
+ * @brief Reads the contents of a file and returns it as a string.
+ *
+ * This function opens a specified file, reads its contents, and returns them as a single string.
+ *
+ * @param fileName The name of the file to read.
+ * @return string The contents of the file as a string.
+ */
+<span style = "background-color:#fdd">string readFileToString(const string&amp; fileName) {
+    std::ifstream file(fileName);
+    if (!file.is_open()) {
+        cerr &lt;&lt; "File could not be opened: " &lt;&lt; fileName &lt;&lt; endl;
+        return "";</span>
+    }
+<span style = "background-color:#fdd">    std::stringstream buffer;
+    buffer &lt;&lt; file.rdbuf();
+    return buffer.str();
+}</span>
+
+/**
+ * @brief Prompts the user to select who goes first in the game.
+ *
+ * This function asks the user whether 'X' or 'O' should go first, or if it should be chosen randomly.
+ * It returns a character ('X' or 'O') based on the user's choice or random selection.
+ *
+ * @return char The player ('X' or 'O') who will make the first move.
+ */
+<span style = "background-color:#dfd">char selectFirstPlayer() {</span>
+    int firstMoveChoice;
+<span style = "background-color:#dfd">    cout &lt;&lt; "=============================================\n";
+    cout &lt;&lt; "      	The first move:\n";
+    cout &lt;&lt; "=============================================";
+    cout &lt;&lt; "\n  [1]  X goes first\n";
+    cout &lt;&lt; "  [2]  O goes first\n";
+    cout &lt;&lt; "  [3]  Random choice\n";
+    cout &lt;&lt; "\nPlease, enter your choice (1-3): ";
+    cin &gt;&gt; firstMoveChoice;
+    if (firstMoveChoice == 3) {
+        srand(time(0));
+        return (rand() % 2 == 0) ? 'X' : 'O';</span>
+    }
+<span style = "background-color:#dfd">    return (firstMoveChoice == 1) ? 'X' : 'O';
+}</span>
+
+/**
+ * @brief Prompts the user to select the game mode.
+ *
+ * This function asks the user to choose the type of game to play, such as 'Man vs Man', 'Man vs AI',
+ * 'AI vs Man', or 'AI vs AI'. It returns a string representing the selected game mode.
+ *
+ * @return string The selected game mode (e.g., "Man vs Man", "Man vs AI").
+ */
+<span style = "background-color:#fdd">string selectGameMode() {</span>
+    int gameModeChoice;
+<span style = "background-color:#fdd">    cout &lt;&lt; "=============================================\n";
+    cout &lt;&lt; "      	Game type:\n";
+    cout &lt;&lt; "=============================================";
+    cout &lt;&lt; "\n  [1]  Man vs Man\n";
+    cout &lt;&lt; "  [2]  Man vs AI\n";
+    cout &lt;&lt; "  [3]  AI vs Man\n";
+    cout &lt;&lt; "  [4]  AI vs AI\n";
+    cout &lt;&lt; "\nPlease, enter your choice (1-4): ";
+    cin &gt;&gt; gameModeChoice;
+    switch (gameModeChoice) {
+    case 1: return "Man vs Man";
+    case 2: return "Man vs AI";
+    case 3: return "AI vs Man";
+    case 4: return "AI vs AI";</span>
+    default:
+<span style = "background-color:#fdd">        cerr &lt;&lt; "Invalid choice, defaulting to Man vs Man." &lt;&lt; endl;
+        return "Man vs Man";</span>
+    }
+<span style = "background-color:#fdd">}</span>
+
+/**
+ * @brief Makes a move on the Tic-Tac-Toe board.
+ *
+ * This function updates the game board with the specified player's move. It places the player's symbol
+ * ('X' or 'O') on the board at the position determined by the move number (1-9). If the cell is already
+ * occupied, the function returns `false`. Otherwise, it places the symbol and returns `true`.
+ *
+ * @param board A reference to a 2D vector representing the game board.
+ * @param move The move number (1-9) representing the position on the board where the player wants to place their symbol.
+ * @param player The symbol of the player ('X' or 'O') making the move.
+ * @return true if the move was successful (the cell was empty and the symbol was placed), false otherwise (if the cell was already occupied).
+ */
+<span style = "background-color:#dfd">bool makeMove(vector&lt;vector&lt;char&gt;&gt;&amp; board, int move, char player) {
+    int row = (move - 1) / 3;
+    int col = (move - 1) % 3;
+    if (board[row][col] == '_') {
+        board[row][col] = player;
+        return true;</span>
+<span style = "background-color:#fdd">    }</span>
+    else {
+<span style = "background-color:#dfd">        return false;</span>
+    }
+<span style = "background-color:#dfd">}</span>
+
+/**
+ * @brief Prints the current state of the Tic-Tac-Toe board.
+ *
+ * This function outputs the current state of the game board to the console. It displays the 3x3 grid
+ * with each cell containing either an 'X', 'O', or an empty space ('_'). The board is visually formatted
+ * with lines separating the rows and columns for easier readability. The cells are colorized with green text.
+ *
+ * @param board A constant reference to a 2D vector representing the Tic-Tac-Toe game board.
+ */
+<span style = "background-color:#dfd">void printBoard(const vector&lt;vector&lt;char&gt;&gt;&amp; board) {
+    cout &lt;&lt; "\n=============================================\n";
+    for (int i = 0; i &lt; 3; ++i) {
+        for (int j = 0; j &lt; 3; ++j) {
+            cout &lt;&lt; "\033[32m" &lt;&lt; " " &lt;&lt; board[i][j] &lt;&lt; " " &lt;&lt; "\033[0m";
+            if (j &lt; 2) cout &lt;&lt; "|";
+        }
+        cout &lt;&lt; "\n";
+        if (i &lt; 2) {
+            cout &lt;&lt; "-----------\n";</span>
+        }
+<span style = "background-color:#dfd">    }
+    cout &lt;&lt; "=============================================\n";
+}</span></pre>
+        <hr />
+        <table width="100%">
+            <thead>
+                <tr>
+                    <th align="center">
+                        <small>Generated by</small>
+                        <a href="https://github.com/OpenCppCoverage/OpenCppCoverage/releases">
+                            <strong>OpenCppCoverage (Version: 0.9.9.0)</strong>
+                        </a>
+                    </th>
+                </tr>
+            </thead>
+        </table>
+    </body>
+</html>

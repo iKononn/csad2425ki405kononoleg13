@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="7" failures="0" disabled="0" errors="0" time="0.037" timestamp="2025-01-13T20:00:17.642" name="AllTests">
+  <testsuite name="GameStateTest" tests="7" failures="0" disabled="0" skipped="0" errors="0" time="0.031" timestamp="2025-01-13T20:00:17.647">
+    <testcase name="UpdateXML_CreatesValidFile" status="run" result="completed" time="0.003" timestamp="2025-01-13T20:00:17.647" classname="GameStateTest" />
+    <testcase name="CreateGameStateXML_CreatesFile" status="run" result="completed" time="0.002" timestamp="2025-01-13T20:00:17.651" classname="GameStateTest" />
+    <testcase name="SelectFirstPlayer_ValidChoice" status="run" result="completed" time="0.011" timestamp="2025-01-13T20:00:17.654" classname="GameStateTest" />
+    <testcase name="MakeMove_ValidMove" status="run" result="completed" time="0" timestamp="2025-01-13T20:00:17.666" classname="GameStateTest" />
+    <testcase name="PrintBoard" status="run" result="completed" time="0.003" timestamp="2025-01-13T20:00:17.668" classname="GameStateTest" />
+    <testcase name="ParseGameStateXML_ValidFile" status="run" result="completed" time="0.004" timestamp="2025-01-13T20:00:17.672" classname="GameStateTest" />
+    <testcase name="ParseGameStateXML_NonExistentFile" status="run" result="completed" time="0.001" timestamp="2025-01-13T20:00:17.677" classname="GameStateTest" />
+  </testsuite>
+</testsuites>

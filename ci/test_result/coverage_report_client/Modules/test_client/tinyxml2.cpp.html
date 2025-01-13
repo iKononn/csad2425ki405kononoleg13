@@ -1,0 +1,3047 @@
+﻿<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+	<head>
+        <meta charset="utf-8"/>
+	    <title>tinyxml2.cpp</title>
+	    <link href="../../third-party/google-code-prettify/prettify-CppCoverage.css" type="text/css" rel="stylesheet" />
+	    <script type="text/javascript" src="../../third-party/google-code-prettify/prettify.js"></script>
+	</head>
+    <body onload="prettyPrint()">
+        <h4></h4>
+        <pre class="prettyprint lang-cpp linenums">
+/*
+Original code by Lee Thomason (www.grinninglizard.com)
+
+This software is provided 'as-is', without any express or implied
+warranty. In no event will the authors be held liable for any
+damages arising from the use of this software.
+
+Permission is granted to anyone to use this software for any
+purpose, including commercial applications, and to alter it and
+redistribute it freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must
+not claim that you wrote the original software. If you use this
+software in a product, an acknowledgment in the product documentation
+would be appreciated but is not required.
+
+2. Altered source versions must be plainly marked as such, and
+must not be misrepresented as being the original software.
+
+3. This notice may not be removed or altered from any source
+distribution.
+*/
+
+
+#include "tinyxml2.h"
+#include &lt;new&gt;		// yes, this one new style header, is in the Android SDK.
+#if defined(ANDROID_NDK) || defined(__BORLANDC__) || defined(__QNXNTO__)
+#   include &lt;stddef.h&gt;
+#   include &lt;stdarg.h&gt;
+#else
+#   include &lt;cstddef&gt;
+#   include &lt;cstdarg&gt;
+#endif
+
+#if defined(_MSC_VER) &amp;&amp; (_MSC_VER &gt;= 1400 ) &amp;&amp; (!defined WINCE)
+// Microsoft Visual Studio, version 2005 and higher. Not WinCE.
+/*int _snprintf_s(
+   char *buffer,
+   size_t sizeOfBuffer,
+   size_t count,
+   const char *format [,
+      argument] ...
+);*/
+static inline int TIXML_SNPRINTF(char* buffer, size_t size, const char* format, ...)
+<span style = "background-color:#fdd">{</span>
+    va_list va;
+<span style = "background-color:#fdd">    va_start(va, format);
+    const int result = vsnprintf_s(buffer, size, _TRUNCATE, format, va);
+    va_end(va);
+    return result;
+}</span>
+
+static inline int TIXML_VSNPRINTF(char* buffer, size_t size, const char* format, va_list va)
+<span style = "background-color:#fdd">{
+    const int result = vsnprintf_s(buffer, size, _TRUNCATE, format, va);
+    return result;
+}</span>
+
+#define TIXML_VSCPRINTF	_vscprintf
+#define TIXML_SSCANF	sscanf_s
+#elif defined _MSC_VER
+// Microsoft Visual Studio 2003 and earlier or WinCE
+#define TIXML_SNPRINTF	_snprintf
+#define TIXML_VSNPRINTF _vsnprintf
+#define TIXML_SSCANF	sscanf
+#if (_MSC_VER &lt; 1400 ) &amp;&amp; (!defined WINCE)
+    // Microsoft Visual Studio 2003 and not WinCE.
+#define TIXML_VSCPRINTF   _vscprintf // VS2003's C runtime has this, but VC6 C runtime or WinCE SDK doesn't have.
+#else
+    // Microsoft Visual Studio 2003 and earlier or WinCE.
+static inline int TIXML_VSCPRINTF(const char* format, va_list va)
+{
+    int len = 512;
+    for (;;) {
+        len = len * 2;
+        char* str = new char[len]();
+        const int required = _vsnprintf(str, len, format, va);
+        delete[] str;
+        if (required != -1) {
+            TIXMLASSERT(required &gt;= 0);
+            len = required;
+            break;
+        }
+    }
+    TIXMLASSERT(len &gt;= 0);
+    return len;
+}
+#endif
+#else
+// GCC version 3 and higher
+//#warning( "Using sn* functions." )
+#define TIXML_SNPRINTF	snprintf
+#define TIXML_VSNPRINTF	vsnprintf
+static inline int TIXML_VSCPRINTF(const char* format, va_list va)
+{
+    int len = vsnprintf(0, 0, format, va);
+    TIXMLASSERT(len &gt;= 0);
+    return len;
+}
+#define TIXML_SSCANF   sscanf
+#endif
+
+#if defined(_WIN64)
+#define TIXML_FSEEK _fseeki64
+#define TIXML_FTELL _ftelli64
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__) || defined(__CYGWIN__)
+#define TIXML_FSEEK fseeko
+#define TIXML_FTELL ftello
+#elif defined(__ANDROID__) &amp;&amp; __ANDROID_API__ &gt; 24
+#define TIXML_FSEEK fseeko64
+#define TIXML_FTELL ftello64
+#else
+#define TIXML_FSEEK fseek
+#define TIXML_FTELL ftell
+#endif
+
+
+static const char LINE_FEED = static_cast&lt;char&gt;(0x0a);			// all line endings are normalized to LF
+static const char LF = LINE_FEED;
+static const char CARRIAGE_RETURN = static_cast&lt;char&gt;(0x0d);			// CR gets filtered out
+static const char CR = CARRIAGE_RETURN;
+static const char SINGLE_QUOTE = '\'';
+static const char DOUBLE_QUOTE = '\"';
+
+// Bunch of unicode info at:
+//		http://www.unicode.org/faq/utf_bom.html
+//	ef bb bf (Microsoft "lead bytes") - designates UTF-8
+
+static const unsigned char TIXML_UTF_LEAD_0 = 0xefU;
+static const unsigned char TIXML_UTF_LEAD_1 = 0xbbU;
+static const unsigned char TIXML_UTF_LEAD_2 = 0xbfU;
+
+namespace tinyxml2
+{
+
+    struct Entity {
+        const char* pattern;
+        int length;
+        char value;
+    };
+
+    static const int NUM_ENTITIES = 5;
+    static const Entity entities[NUM_ENTITIES] = {
+        { "quot", 4,	DOUBLE_QUOTE },
+        { "amp", 3,		'&amp;'  },
+        { "apos", 4,	SINGLE_QUOTE },
+        { "lt",	2, 		'&lt;'	 },
+        { "gt",	2,		'&gt;'	 }
+    };
+
+
+    StrPair::~StrPair()
+<span style = "background-color:#fdd">    {
+        Reset();
+    }</span>
+
+
+    void StrPair::TransferTo(StrPair* other)
+<span style = "background-color:#fdd">    {
+        if (this == other) {
+            return;</span>
+        }
+        // This in effect implements the assignment operator by "moving"
+        // ownership (as in auto_ptr).
+
+<span style = "background-color:#fdd">        TIXMLASSERT(other != 0);
+        TIXMLASSERT(other-&gt;_flags == 0);
+        TIXMLASSERT(other-&gt;_start == 0);
+        TIXMLASSERT(other-&gt;_end == 0);</span>
+
+<span style = "background-color:#fdd">        other-&gt;Reset();</span>
+
+<span style = "background-color:#fdd">        other-&gt;_flags = _flags;
+        other-&gt;_start = _start;
+        other-&gt;_end = _end;</span>
+
+<span style = "background-color:#fdd">        _flags = 0;
+        _start = 0;
+        _end = 0;
+    }</span>
+
+
+    void StrPair::Reset()
+<span style = "background-color:#fdd">    {
+        if (_flags &amp; NEEDS_DELETE) {
+            delete[] _start;</span>
+        }
+<span style = "background-color:#fdd">        _flags = 0;
+        _start = 0;
+        _end = 0;
+    }</span>
+
+
+    void StrPair::SetStr(const char* str, int flags)
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(str);
+        Reset();
+        size_t len = strlen(str);
+        TIXMLASSERT(_start == 0);
+        _start = new char[len + 1];
+        memcpy(_start, str, len + 1);
+        _end = _start + len;
+        _flags = flags | NEEDS_DELETE;
+    }</span>
+
+
+    char* StrPair::ParseText(char* p, const char* endTag, int strFlags, int* curLineNumPtr)
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(p);
+        TIXMLASSERT(endTag &amp;&amp; *endTag);
+        TIXMLASSERT(curLineNumPtr);</span>
+
+<span style = "background-color:#fdd">        char* start = p;
+        const char  endChar = *endTag;
+        size_t length = strlen(endTag);</span>
+
+        // Inner loop of text parsing.
+<span style = "background-color:#fdd">        while (*p) {
+            if (*p == endChar &amp;&amp; strncmp(p, endTag, length) == 0) {
+                Set(start, p, strFlags);
+                return p + length;
+            }
+            else if (*p == '\n') {
+                ++(*curLineNumPtr);</span>
+            }
+<span style = "background-color:#fdd">            ++p;
+            TIXMLASSERT(p);
+        }
+        return 0;
+    }</span>
+
+
+    char* StrPair::ParseName(char* p)
+<span style = "background-color:#fdd">    {
+        if (!p || !(*p)) {
+            return 0;</span>
+        }
+<span style = "background-color:#fdd">        if (!XMLUtil::IsNameStartChar(static_cast&lt;unsigned char&gt;(*p))) {
+            return 0;</span>
+        }
+
+<span style = "background-color:#fdd">        char* const start = p;
+        ++p;
+        while (*p &amp;&amp; XMLUtil::IsNameChar(static_cast&lt;unsigned char&gt;(*p))) {
+            ++p;
+        }</span>
+
+<span style = "background-color:#fdd">        Set(start, p, 0);
+        return p;
+    }</span>
+
+
+    void StrPair::CollapseWhitespace()
+<span style = "background-color:#fdd">    {</span>
+        // Adjusting _start would cause undefined behavior on delete[]
+<span style = "background-color:#fdd">        TIXMLASSERT((_flags &amp; NEEDS_DELETE) == 0);</span>
+        // Trim leading space.
+<span style = "background-color:#fdd">        _start = XMLUtil::SkipWhiteSpace(_start, 0);</span>
+
+<span style = "background-color:#fdd">        if (*_start) {
+            const char* p = _start;	// the read pointer
+            char* q = _start;	// the write pointer</span>
+
+<span style = "background-color:#fdd">            while (*p) {
+                if (XMLUtil::IsWhiteSpace(*p)) {
+                    p = XMLUtil::SkipWhiteSpace(p, 0);
+                    if (*p == 0) {
+                        break;    // don't write to q; this trims the trailing space.</span>
+                    }
+<span style = "background-color:#fdd">                    *q = ' ';
+                    ++q;</span>
+                }
+<span style = "background-color:#fdd">                *q = *p;
+                ++q;
+                ++p;
+            }
+            *q = 0;</span>
+        }
+<span style = "background-color:#fdd">    }</span>
+
+
+    const char* StrPair::GetStr()
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(_start);
+        TIXMLASSERT(_end);
+        if (_flags &amp; NEEDS_FLUSH) {
+            *_end = 0;
+            _flags ^= NEEDS_FLUSH;</span>
+
+<span style = "background-color:#fdd">            if (_flags) {
+                const char* p = _start;	// the read pointer
+                char* q = _start;	// the write pointer</span>
+
+<span style = "background-color:#fdd">                while (p &lt; _end) {
+                    if ((_flags &amp; NEEDS_NEWLINE_NORMALIZATION) &amp;&amp; *p == CR) {</span>
+                        // CR-LF pair becomes LF
+                        // CR alone becomes LF
+                        // LF-CR becomes LF
+<span style = "background-color:#fdd">                        if (*(p + 1) == LF) {
+                            p += 2;
+                        }</span>
+                        else {
+<span style = "background-color:#fdd">                            ++p;</span>
+                        }
+<span style = "background-color:#fdd">                        *q = LF;
+                        ++q;
+                    }
+                    else if ((_flags &amp; NEEDS_NEWLINE_NORMALIZATION) &amp;&amp; *p == LF) {
+                        if (*(p + 1) == CR) {
+                            p += 2;
+                        }</span>
+                        else {
+<span style = "background-color:#fdd">                            ++p;</span>
+                        }
+<span style = "background-color:#fdd">                        *q = LF;
+                        ++q;
+                    }
+                    else if ((_flags &amp; NEEDS_ENTITY_PROCESSING) &amp;&amp; *p == '&amp;') {</span>
+                        // Entities handled by tinyXML2:
+                        // - special entities in the entity table [in/out]
+                        // - numeric character reference [in]
+                        //   &amp;#20013; or &amp;#x4e2d;
+
+<span style = "background-color:#fdd">                        if (*(p + 1) == '#') {
+                            const int buflen = 10;
+                            char buf[buflen] = { 0 };
+                            int len = 0;
+                            const char* adjusted = const_cast&lt;char*&gt;(XMLUtil::GetCharacterRef(p, buf, &amp;len));
+                            if (adjusted == 0) {
+                                *q = *p;
+                                ++p;
+                                ++q;
+                            }</span>
+                            else {
+<span style = "background-color:#fdd">                                TIXMLASSERT(0 &lt;= len &amp;&amp; len &lt;= buflen);
+                                TIXMLASSERT(q + len &lt;= adjusted);
+                                p = adjusted;
+                                memcpy(q, buf, len);
+                                q += len;</span>
+                            }
+<span style = "background-color:#fdd">                        }</span>
+                        else {
+<span style = "background-color:#fdd">                            bool entityFound = false;
+                            for (int i = 0; i &lt; NUM_ENTITIES; ++i) {
+                                const Entity&amp; entity = entities[i];</span>
+                                if (strncmp(p + 1, entity.pattern, entity.length) == 0
+<span style = "background-color:#fdd">                                    &amp;&amp; *(p + entity.length + 1) == ';') {</span>
+                                    // Found an entity - convert.
+<span style = "background-color:#fdd">                                    *q = entity.value;
+                                    ++q;
+                                    p += entity.length + 2;
+                                    entityFound = true;
+                                    break;</span>
+                                }
+<span style = "background-color:#fdd">                            }
+                            if (!entityFound) {</span>
+                                // fixme: treat as error?
+<span style = "background-color:#fdd">                                ++p;
+                                ++q;</span>
+                            }
+                        }
+<span style = "background-color:#fdd">                    }</span>
+                    else {
+<span style = "background-color:#fdd">                        *q = *p;
+                        ++p;
+                        ++q;</span>
+                    }
+<span style = "background-color:#fdd">                }
+                *q = 0;</span>
+            }
+            // The loop below has plenty going on, and this
+            // is a less useful mode. Break it out.
+<span style = "background-color:#fdd">            if (_flags &amp; NEEDS_WHITESPACE_COLLAPSING) {
+                CollapseWhitespace();</span>
+            }
+<span style = "background-color:#fdd">            _flags = (_flags &amp; NEEDS_DELETE);</span>
+        }
+<span style = "background-color:#fdd">        TIXMLASSERT(_start);
+        return _start;
+    }</span>
+
+
+
+
+    // --------- XMLUtil ----------- //
+
+    const char* XMLUtil::writeBoolTrue = "true";
+    const char* XMLUtil::writeBoolFalse = "false";
+
+    void XMLUtil::SetBoolSerialization(const char* writeTrue, const char* writeFalse)
+<span style = "background-color:#fdd">    {</span>
+        static const char* defTrue = "true";
+        static const char* defFalse = "false";
+
+<span style = "background-color:#fdd">        writeBoolTrue = (writeTrue) ? writeTrue : defTrue;
+        writeBoolFalse = (writeFalse) ? writeFalse : defFalse;
+    }</span>
+
+
+    const char* XMLUtil::ReadBOM(const char* p, bool* bom)
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(p);
+        TIXMLASSERT(bom);
+        *bom = false;
+        const unsigned char* pu = reinterpret_cast&lt;const unsigned char*&gt;(p);</span>
+        // Check for BOM:
+        if (*(pu + 0) == TIXML_UTF_LEAD_0
+            &amp;&amp; *(pu + 1) == TIXML_UTF_LEAD_1
+<span style = "background-color:#fdd">            &amp;&amp; *(pu + 2) == TIXML_UTF_LEAD_2) {
+            *bom = true;
+            p += 3;</span>
+        }
+<span style = "background-color:#fdd">        TIXMLASSERT(p);
+        return p;
+    }</span>
+
+
+    void XMLUtil::ConvertUTF32ToUTF8(unsigned long input, char* output, int* length)
+<span style = "background-color:#fdd">    {
+        const unsigned long BYTE_MASK = 0xBF;
+        const unsigned long BYTE_MARK = 0x80;
+        const unsigned long FIRST_BYTE_MARK[7] = { 0x00, 0x00, 0xC0, 0xE0, 0xF0, 0xF8, 0xFC };</span>
+
+<span style = "background-color:#fdd">        if (input &lt; 0x80) {
+            *length = 1;
+        }
+        else if (input &lt; 0x800) {
+            *length = 2;
+        }
+        else if (input &lt; 0x10000) {
+            *length = 3;
+        }
+        else if (input &lt; 0x200000) {
+            *length = 4;
+        }</span>
+        else {
+<span style = "background-color:#fdd">            *length = 0;    // This code won't convert this correctly anyway.
+            return;</span>
+        }
+
+<span style = "background-color:#fdd">        output += *length;</span>
+
+        // Scary scary fall throughs are annotated with carefully designed comments
+        // to suppress compiler warnings such as -Wimplicit-fallthrough in gcc
+<span style = "background-color:#fdd">        switch (*length) {</span>
+        case 4:
+<span style = "background-color:#fdd">            --output;
+            *output = static_cast&lt;char&gt;((input | BYTE_MARK) &amp; BYTE_MASK);
+            input &gt;&gt;= 6;</span>
+            //fall through
+        case 3:
+<span style = "background-color:#fdd">            --output;
+            *output = static_cast&lt;char&gt;((input | BYTE_MARK) &amp; BYTE_MASK);
+            input &gt;&gt;= 6;</span>
+            //fall through
+        case 2:
+<span style = "background-color:#fdd">            --output;
+            *output = static_cast&lt;char&gt;((input | BYTE_MARK) &amp; BYTE_MASK);
+            input &gt;&gt;= 6;</span>
+            //fall through
+        case 1:
+<span style = "background-color:#fdd">            --output;
+            *output = static_cast&lt;char&gt;(input | FIRST_BYTE_MARK[*length]);
+            break;</span>
+        default:
+<span style = "background-color:#fdd">            TIXMLASSERT(false);</span>
+        }
+<span style = "background-color:#fdd">    }</span>
+
+
+    const char* XMLUtil::GetCharacterRef(const char* p, char* value, int* length)
+<span style = "background-color:#fdd">    {</span>
+        // Assume an entity, and pull it out.
+<span style = "background-color:#fdd">        *length = 0;</span>
+
+        static const uint32_t MAX_CODE_POINT = 0x10FFFF;
+
+<span style = "background-color:#fdd">        if (*(p + 1) == '#' &amp;&amp; *(p + 2)) {
+            uint32_t ucs = 0;
+            ptrdiff_t delta = 0;
+            uint32_t mult = 1;</span>
+            static const char SEMICOLON = ';';
+
+<span style = "background-color:#fdd">            bool hex = false;
+            uint32_t radix = 10;
+            const char* q = 0;
+            char terminator = '#';</span>
+
+<span style = "background-color:#fdd">            if (*(p + 2) == 'x') {</span>
+                // Hexadecimal.
+<span style = "background-color:#fdd">                hex = true;
+                radix = 16;
+                terminator = 'x';</span>
+
+<span style = "background-color:#fdd">                q = p + 3;
+            }</span>
+            else {
+                // Decimal.
+<span style = "background-color:#fdd">                q = p + 2;</span>
+            }
+<span style = "background-color:#fdd">            if (!(*q)) {
+                return 0;</span>
+            }
+
+<span style = "background-color:#fdd">            q = strchr(q, SEMICOLON);
+            if (!q) {
+                return 0;</span>
+            }
+<span style = "background-color:#fdd">            TIXMLASSERT(*q == SEMICOLON);</span>
+
+<span style = "background-color:#fdd">            delta = q - p;
+            --q;</span>
+
+<span style = "background-color:#fdd">            while (*q != terminator) {
+                uint32_t digit = 0;</span>
+
+<span style = "background-color:#fdd">                if (*q &gt;= '0' &amp;&amp; *q &lt;= '9') {
+                    digit = *q - '0';
+                }
+                else if (hex &amp;&amp; (*q &gt;= 'a' &amp;&amp; *q &lt;= 'f')) {
+                    digit = *q - 'a' + 10;
+                }
+                else if (hex &amp;&amp; (*q &gt;= 'A' &amp;&amp; *q &lt;= 'F')) {
+                    digit = *q - 'A' + 10;
+                }</span>
+                else {
+<span style = "background-color:#fdd">                    return 0;</span>
+                }
+<span style = "background-color:#fdd">                TIXMLASSERT(digit &lt; radix);</span>
+
+<span style = "background-color:#fdd">                const unsigned int digitScaled = mult * digit;
+                ucs += digitScaled;
+                mult *= radix;</span>
+
+                // Security check: could a value exist that is out of range?
+                // Easily; limit to the MAX_CODE_POINT, which also allows for a
+                // bunch of leading zeroes.
+<span style = "background-color:#fdd">                if (mult &gt; MAX_CODE_POINT) {
+                    mult = MAX_CODE_POINT;</span>
+                }
+<span style = "background-color:#fdd">                --q;
+            }</span>
+            // Out of range:
+<span style = "background-color:#fdd">            if (ucs &gt; MAX_CODE_POINT) {
+                return 0;</span>
+            }
+            // convert the UCS to UTF-8
+<span style = "background-color:#fdd">            ConvertUTF32ToUTF8(ucs, value, length);
+            if (length == 0) {</span>
+                // If length is 0, there was an error. (Security? Bad input?)
+                // Fail safely.
+<span style = "background-color:#fdd">                return 0;</span>
+            }
+<span style = "background-color:#fdd">            return p + delta + 1;</span>
+        }
+<span style = "background-color:#fdd">        return p + 1;
+    }</span>
+
+    void XMLUtil::ToStr(int v, char* buffer, int bufferSize)
+<span style = "background-color:#fdd">    {
+        TIXML_SNPRINTF(buffer, bufferSize, "%d", v);
+    }</span>
+
+
+    void XMLUtil::ToStr(unsigned v, char* buffer, int bufferSize)
+<span style = "background-color:#fdd">    {
+        TIXML_SNPRINTF(buffer, bufferSize, "%u", v);
+    }</span>
+
+
+    void XMLUtil::ToStr(bool v, char* buffer, int bufferSize)
+<span style = "background-color:#fdd">    {
+        TIXML_SNPRINTF(buffer, bufferSize, "%s", v ? writeBoolTrue : writeBoolFalse);
+    }</span>
+
+    /*
+        ToStr() of a number is a very tricky topic.
+        https://github.com/leethomason/tinyxml2/issues/106
+    */
+    void XMLUtil::ToStr(float v, char* buffer, int bufferSize)
+<span style = "background-color:#fdd">    {
+        TIXML_SNPRINTF(buffer, bufferSize, "%.8g", v);
+    }</span>
+
+
+    void XMLUtil::ToStr(double v, char* buffer, int bufferSize)
+<span style = "background-color:#fdd">    {
+        TIXML_SNPRINTF(buffer, bufferSize, "%.17g", v);
+    }</span>
+
+
+    void XMLUtil::ToStr(int64_t v, char* buffer, int bufferSize)
+<span style = "background-color:#fdd">    {</span>
+        // horrible syntax trick to make the compiler happy about %lld
+<span style = "background-color:#fdd">        TIXML_SNPRINTF(buffer, bufferSize, "%lld", static_cast&lt;long long&gt;(v));
+    }</span>
+
+    void XMLUtil::ToStr(uint64_t v, char* buffer, int bufferSize)
+<span style = "background-color:#fdd">    {</span>
+        // horrible syntax trick to make the compiler happy about %llu
+<span style = "background-color:#fdd">        TIXML_SNPRINTF(buffer, bufferSize, "%llu", static_cast&lt;unsigned long long&gt;(v));
+    }</span>
+
+    bool XMLUtil::ToInt(const char* str, int* value)
+<span style = "background-color:#fdd">    {
+        if (IsPrefixHex(str)) {</span>
+            unsigned v;
+<span style = "background-color:#fdd">            if (TIXML_SSCANF(str, "%x", &amp;v) == 1) {
+                *value = static_cast&lt;int&gt;(v);
+                return true;</span>
+            }
+<span style = "background-color:#fdd">        }</span>
+        else {
+<span style = "background-color:#fdd">            if (TIXML_SSCANF(str, "%d", value) == 1) {
+                return true;</span>
+            }
+        }
+<span style = "background-color:#fdd">        return false;
+    }</span>
+
+    bool XMLUtil::ToUnsigned(const char* str, unsigned* value)
+<span style = "background-color:#fdd">    {
+        if (TIXML_SSCANF(str, IsPrefixHex(str) ? "%x" : "%u", value) == 1) {
+            return true;</span>
+        }
+<span style = "background-color:#fdd">        return false;
+    }</span>
+
+    bool XMLUtil::ToBool(const char* str, bool* value)
+<span style = "background-color:#fdd">    {
+        int ival = 0;
+        if (ToInt(str, &amp;ival)) {
+            *value = (ival == 0) ? false : true;
+            return true;</span>
+        }
+        static const char* TRUE_VALS[] = { "true", "True", "TRUE", 0 };
+        static const char* FALSE_VALS[] = { "false", "False", "FALSE", 0 };
+
+<span style = "background-color:#fdd">        for (int i = 0; TRUE_VALS[i]; ++i) {
+            if (StringEqual(str, TRUE_VALS[i])) {
+                *value = true;
+                return true;</span>
+            }
+<span style = "background-color:#fdd">        }
+        for (int i = 0; FALSE_VALS[i]; ++i) {
+            if (StringEqual(str, FALSE_VALS[i])) {
+                *value = false;
+                return true;</span>
+            }
+<span style = "background-color:#fdd">        }
+        return false;
+    }</span>
+
+
+    bool XMLUtil::ToFloat(const char* str, float* value)
+<span style = "background-color:#fdd">    {
+        if (TIXML_SSCANF(str, "%f", value) == 1) {
+            return true;</span>
+        }
+<span style = "background-color:#fdd">        return false;
+    }</span>
+
+
+    bool XMLUtil::ToDouble(const char* str, double* value)
+<span style = "background-color:#fdd">    {
+        if (TIXML_SSCANF(str, "%lf", value) == 1) {
+            return true;</span>
+        }
+<span style = "background-color:#fdd">        return false;
+    }</span>
+
+
+    bool XMLUtil::ToInt64(const char* str, int64_t* value)
+<span style = "background-color:#fdd">    {
+        if (IsPrefixHex(str)) {
+            unsigned long long v = 0;	// horrible syntax trick to make the compiler happy about %llx
+            if (TIXML_SSCANF(str, "%llx", &amp;v) == 1) {
+                *value = static_cast&lt;int64_t&gt;(v);
+                return true;</span>
+            }
+<span style = "background-color:#fdd">        }</span>
+        else {
+<span style = "background-color:#fdd">            long long v = 0;	// horrible syntax trick to make the compiler happy about %lld
+            if (TIXML_SSCANF(str, "%lld", &amp;v) == 1) {
+                *value = static_cast&lt;int64_t&gt;(v);
+                return true;</span>
+            }
+        }
+<span style = "background-color:#fdd">        return false;
+    }</span>
+
+
+<span style = "background-color:#fdd">    bool XMLUtil::ToUnsigned64(const char* str, uint64_t* value) {
+        unsigned long long v = 0;	// horrible syntax trick to make the compiler happy about %llu
+        if (TIXML_SSCANF(str, IsPrefixHex(str) ? "%llx" : "%llu", &amp;v) == 1) {
+            *value = static_cast&lt;uint64_t&gt;(v);
+            return true;</span>
+        }
+<span style = "background-color:#fdd">        return false;
+    }</span>
+
+
+    char* XMLDocument::Identify(char* p, XMLNode** node, bool first)
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(node);
+        TIXMLASSERT(p);
+        char* const start = p;
+        int const startLine = _parseCurLineNum;
+        p = XMLUtil::SkipWhiteSpace(p, &amp;_parseCurLineNum);
+        if (!*p) {
+            *node = 0;
+            TIXMLASSERT(p);
+            return p;</span>
+        }
+
+        // These strings define the matching patterns:
+        static const char* xmlHeader = { "&lt;?" };
+        static const char* commentHeader = { "&lt;!--" };
+        static const char* cdataHeader = { "&lt;![CDATA[" };
+        static const char* dtdHeader = { "&lt;!" };
+        static const char* elementHeader = { "&lt;" };	// and a header for everything else; check last.
+
+        static const int xmlHeaderLen = 2;
+        static const int commentHeaderLen = 4;
+        static const int cdataHeaderLen = 9;
+        static const int dtdHeaderLen = 2;
+        static const int elementHeaderLen = 1;
+
+<span style = "background-color:#fdd">        TIXMLASSERT(sizeof(XMLComment) == sizeof(XMLUnknown));		// use same memory pool
+        TIXMLASSERT(sizeof(XMLComment) == sizeof(XMLDeclaration));	// use same memory pool
+        XMLNode* returnNode = 0;
+        if (XMLUtil::StringEqual(p, xmlHeader, xmlHeaderLen)) {
+            returnNode = CreateUnlinkedNode&lt;XMLDeclaration&gt;(_commentPool);
+            returnNode-&gt;_parseLineNum = _parseCurLineNum;
+            p += xmlHeaderLen;
+        }
+        else if (XMLUtil::StringEqual(p, commentHeader, commentHeaderLen)) {
+            returnNode = CreateUnlinkedNode&lt;XMLComment&gt;(_commentPool);
+            returnNode-&gt;_parseLineNum = _parseCurLineNum;
+            p += commentHeaderLen;
+        }
+        else if (XMLUtil::StringEqual(p, cdataHeader, cdataHeaderLen)) {
+            XMLText* text = CreateUnlinkedNode&lt;XMLText&gt;(_textPool);
+            returnNode = text;
+            returnNode-&gt;_parseLineNum = _parseCurLineNum;
+            p += cdataHeaderLen;
+            text-&gt;SetCData(true);
+        }
+        else if (XMLUtil::StringEqual(p, dtdHeader, dtdHeaderLen)) {
+            returnNode = CreateUnlinkedNode&lt;XMLUnknown&gt;(_commentPool);
+            returnNode-&gt;_parseLineNum = _parseCurLineNum;
+            p += dtdHeaderLen;
+        }
+        else if (XMLUtil::StringEqual(p, elementHeader, elementHeaderLen)) {</span>
+
+            // Preserve whitespace pedantically before closing tag, when it's immediately after opening tag
+<span style = "background-color:#fdd">            if (WhitespaceMode() == PEDANTIC_WHITESPACE &amp;&amp; first &amp;&amp; p != start &amp;&amp; *(p + elementHeaderLen) == '/') {
+                returnNode = CreateUnlinkedNode&lt;XMLText&gt;(_textPool);
+                returnNode-&gt;_parseLineNum = startLine;
+                p = start;	// Back it up, all the text counts.
+                _parseCurLineNum = startLine;
+            }</span>
+            else {
+<span style = "background-color:#fdd">                returnNode = CreateUnlinkedNode&lt;XMLElement&gt;(_elementPool);
+                returnNode-&gt;_parseLineNum = _parseCurLineNum;
+                p += elementHeaderLen;</span>
+            }
+<span style = "background-color:#fdd">        }</span>
+        else {
+<span style = "background-color:#fdd">            returnNode = CreateUnlinkedNode&lt;XMLText&gt;(_textPool);
+            returnNode-&gt;_parseLineNum = _parseCurLineNum; // Report line of first non-whitespace character
+            p = start;	// Back it up, all the text counts.
+            _parseCurLineNum = startLine;</span>
+        }
+
+<span style = "background-color:#fdd">        TIXMLASSERT(returnNode);
+        TIXMLASSERT(p);
+        *node = returnNode;
+        return p;
+    }</span>
+
+
+    bool XMLDocument::Accept(XMLVisitor* visitor) const
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(visitor);
+        if (visitor-&gt;VisitEnter(*this)) {
+            for (const XMLNode* node = FirstChild(); node; node = node-&gt;NextSibling()) {
+                if (!node-&gt;Accept(visitor)) {
+                    break;</span>
+                }
+<span style = "background-color:#fdd">            }</span>
+        }
+<span style = "background-color:#fdd">        return visitor-&gt;VisitExit(*this);
+    }</span>
+
+
+    // --------- XMLNode ----------- //
+
+    XMLNode::XMLNode(XMLDocument* doc) :
+<span style = "background-color:#fdd">        _document(doc),
+        _parent(0),
+        _value(),
+        _parseLineNum(0),
+        _firstChild(0), _lastChild(0),
+        _prev(0), _next(0),
+        _userData(0),
+        _memPool(0)
+    {
+    }</span>
+
+
+    XMLNode::~XMLNode()
+<span style = "background-color:#fdd">    {
+        DeleteChildren();
+        if (_parent) {
+            _parent-&gt;Unlink(this);</span>
+        }
+<span style = "background-color:#fdd">    }</span>
+
+    // ChildElementCount was originally suggested by msteiger on the sourceforge page for TinyXML and modified by KB1SPH for TinyXML-2.
+
+<span style = "background-color:#fdd">    int XMLNode::ChildElementCount(const char* value) const {
+        int count = 0;</span>
+
+<span style = "background-color:#fdd">        const XMLElement* e = FirstChildElement(value);</span>
+
+<span style = "background-color:#fdd">        while (e) {
+            e = e-&gt;NextSiblingElement(value);
+            count++;
+        }</span>
+
+<span style = "background-color:#fdd">        return count;
+    }</span>
+
+<span style = "background-color:#fdd">    int XMLNode::ChildElementCount() const {
+        int count = 0;</span>
+
+<span style = "background-color:#fdd">        const XMLElement* e = FirstChildElement();</span>
+
+<span style = "background-color:#fdd">        while (e) {
+            e = e-&gt;NextSiblingElement();
+            count++;
+        }</span>
+
+<span style = "background-color:#fdd">        return count;
+    }</span>
+
+    const char* XMLNode::Value() const
+<span style = "background-color:#fdd">    {</span>
+        // Edge case: XMLDocuments don't have a Value. Return null.
+<span style = "background-color:#fdd">        if (this-&gt;ToDocument())
+            return 0;
+        return _value.GetStr();
+    }</span>
+
+    void XMLNode::SetValue(const char* str, bool staticMem)
+<span style = "background-color:#fdd">    {
+        if (staticMem) {
+            _value.SetInternedStr(str);
+        }</span>
+        else {
+<span style = "background-color:#fdd">            _value.SetStr(str);</span>
+        }
+<span style = "background-color:#fdd">    }</span>
+
+    XMLNode* XMLNode::DeepClone(XMLDocument* target) const
+<span style = "background-color:#fdd">    {
+        XMLNode* clone = this-&gt;ShallowClone(target);
+        if (!clone) return 0;</span>
+
+<span style = "background-color:#fdd">        for (const XMLNode* child = this-&gt;FirstChild(); child; child = child-&gt;NextSibling()) {
+            XMLNode* childClone = child-&gt;DeepClone(target);
+            TIXMLASSERT(childClone);
+            clone-&gt;InsertEndChild(childClone);
+        }
+        return clone;
+    }</span>
+
+    void XMLNode::DeleteChildren()
+<span style = "background-color:#fdd">    {
+        while (_firstChild) {
+            TIXMLASSERT(_lastChild);
+            DeleteChild(_firstChild);
+        }
+        _firstChild = _lastChild = 0;
+    }</span>
+
+
+    void XMLNode::Unlink(XMLNode* child)
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(child);
+        TIXMLASSERT(child-&gt;_document == _document);
+        TIXMLASSERT(child-&gt;_parent == this);
+        if (child == _firstChild) {
+            _firstChild = _firstChild-&gt;_next;</span>
+        }
+<span style = "background-color:#fdd">        if (child == _lastChild) {
+            _lastChild = _lastChild-&gt;_prev;</span>
+        }
+
+<span style = "background-color:#fdd">        if (child-&gt;_prev) {
+            child-&gt;_prev-&gt;_next = child-&gt;_next;</span>
+        }
+<span style = "background-color:#fdd">        if (child-&gt;_next) {
+            child-&gt;_next-&gt;_prev = child-&gt;_prev;</span>
+        }
+<span style = "background-color:#fdd">        child-&gt;_next = 0;
+        child-&gt;_prev = 0;
+        child-&gt;_parent = 0;
+    }</span>
+
+
+    void XMLNode::DeleteChild(XMLNode* node)
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(node);
+        TIXMLASSERT(node-&gt;_document == _document);
+        TIXMLASSERT(node-&gt;_parent == this);
+        Unlink(node);
+        TIXMLASSERT(node-&gt;_prev == 0);
+        TIXMLASSERT(node-&gt;_next == 0);
+        TIXMLASSERT(node-&gt;_parent == 0);
+        DeleteNode(node);
+    }</span>
+
+
+    XMLNode* XMLNode::InsertEndChild(XMLNode* addThis)
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(addThis);
+        if (addThis-&gt;_document != _document) {
+            TIXMLASSERT(false);
+            return 0;</span>
+        }
+<span style = "background-color:#fdd">        InsertChildPreamble(addThis);</span>
+
+<span style = "background-color:#fdd">        if (_lastChild) {
+            TIXMLASSERT(_firstChild);
+            TIXMLASSERT(_lastChild-&gt;_next == 0);
+            _lastChild-&gt;_next = addThis;
+            addThis-&gt;_prev = _lastChild;
+            _lastChild = addThis;</span>
+
+<span style = "background-color:#fdd">            addThis-&gt;_next = 0;
+        }</span>
+        else {
+<span style = "background-color:#fdd">            TIXMLASSERT(_firstChild == 0);
+            _firstChild = _lastChild = addThis;</span>
+
+<span style = "background-color:#fdd">            addThis-&gt;_prev = 0;
+            addThis-&gt;_next = 0;</span>
+        }
+<span style = "background-color:#fdd">        addThis-&gt;_parent = this;
+        return addThis;
+    }</span>
+
+
+    XMLNode* XMLNode::InsertFirstChild(XMLNode* addThis)
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(addThis);
+        if (addThis-&gt;_document != _document) {
+            TIXMLASSERT(false);
+            return 0;</span>
+        }
+<span style = "background-color:#fdd">        InsertChildPreamble(addThis);</span>
+
+<span style = "background-color:#fdd">        if (_firstChild) {
+            TIXMLASSERT(_lastChild);
+            TIXMLASSERT(_firstChild-&gt;_prev == 0);</span>
+
+<span style = "background-color:#fdd">            _firstChild-&gt;_prev = addThis;
+            addThis-&gt;_next = _firstChild;
+            _firstChild = addThis;</span>
+
+<span style = "background-color:#fdd">            addThis-&gt;_prev = 0;
+        }</span>
+        else {
+<span style = "background-color:#fdd">            TIXMLASSERT(_lastChild == 0);
+            _firstChild = _lastChild = addThis;</span>
+
+<span style = "background-color:#fdd">            addThis-&gt;_prev = 0;
+            addThis-&gt;_next = 0;</span>
+        }
+<span style = "background-color:#fdd">        addThis-&gt;_parent = this;
+        return addThis;
+    }</span>
+
+
+    XMLNode* XMLNode::InsertAfterChild(XMLNode* afterThis, XMLNode* addThis)
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(addThis);
+        if (addThis-&gt;_document != _document) {
+            TIXMLASSERT(false);
+            return 0;</span>
+        }
+
+<span style = "background-color:#fdd">        TIXMLASSERT(afterThis);</span>
+
+<span style = "background-color:#fdd">        if (afterThis-&gt;_parent != this) {
+            TIXMLASSERT(false);
+            return 0;</span>
+        }
+<span style = "background-color:#fdd">        if (afterThis == addThis) {</span>
+            // Current state: BeforeThis -&gt; AddThis -&gt; OneAfterAddThis
+            // Now AddThis must disappear from it's location and then
+            // reappear between BeforeThis and OneAfterAddThis.
+            // So just leave it where it is.
+<span style = "background-color:#fdd">            return addThis;</span>
+        }
+
+<span style = "background-color:#fdd">        if (afterThis-&gt;_next == 0) {</span>
+            // The last node or the only node.
+<span style = "background-color:#fdd">            return InsertEndChild(addThis);</span>
+        }
+<span style = "background-color:#fdd">        InsertChildPreamble(addThis);
+        addThis-&gt;_prev = afterThis;
+        addThis-&gt;_next = afterThis-&gt;_next;
+        afterThis-&gt;_next-&gt;_prev = addThis;
+        afterThis-&gt;_next = addThis;
+        addThis-&gt;_parent = this;
+        return addThis;
+    }</span>
+
+
+
+
+    const XMLElement* XMLNode::FirstChildElement(const char* name) const
+<span style = "background-color:#fdd">    {
+        for (const XMLNode* node = _firstChild; node; node = node-&gt;_next) {
+            const XMLElement* element = node-&gt;ToElementWithName(name);
+            if (element) {
+                return element;</span>
+            }
+<span style = "background-color:#fdd">        }
+        return 0;
+    }</span>
+
+
+    const XMLElement* XMLNode::LastChildElement(const char* name) const
+<span style = "background-color:#fdd">    {
+        for (const XMLNode* node = _lastChild; node; node = node-&gt;_prev) {
+            const XMLElement* element = node-&gt;ToElementWithName(name);
+            if (element) {
+                return element;</span>
+            }
+<span style = "background-color:#fdd">        }
+        return 0;
+    }</span>
+
+
+    const XMLElement* XMLNode::NextSiblingElement(const char* name) const
+<span style = "background-color:#fdd">    {
+        for (const XMLNode* node = _next; node; node = node-&gt;_next) {
+            const XMLElement* element = node-&gt;ToElementWithName(name);
+            if (element) {
+                return element;</span>
+            }
+<span style = "background-color:#fdd">        }
+        return 0;
+    }</span>
+
+
+    const XMLElement* XMLNode::PreviousSiblingElement(const char* name) const
+<span style = "background-color:#fdd">    {
+        for (const XMLNode* node = _prev; node; node = node-&gt;_prev) {
+            const XMLElement* element = node-&gt;ToElementWithName(name);
+            if (element) {
+                return element;</span>
+            }
+<span style = "background-color:#fdd">        }
+        return 0;
+    }</span>
+
+
+    char* XMLNode::ParseDeep(char* p, StrPair* parentEndTag, int* curLineNumPtr)
+<span style = "background-color:#fdd">    {</span>
+        // This is a recursive method, but thinking about it "at the current level"
+        // it is a pretty simple flat list:
+        //		&lt;foo/&gt;
+        //		&lt;!-- comment --&gt;
+        //
+        // With a special case:
+        //		&lt;foo&gt;
+        //		&lt;/foo&gt;
+        //		&lt;!-- comment --&gt;
+        //
+        // Where the closing element (/foo) *must* be the next thing after the opening
+        // element, and the names must match. BUT the tricky bit is that the closing
+        // element will be read by the child.
+        //
+        // 'endTag' is the end tag for this node, it is returned by a call to a child.
+        // 'parentEnd' is the end tag for the parent, which is filled in and returned.
+
+<span style = "background-color:#fdd">        XMLDocument::DepthTracker tracker(_document);
+        if (_document-&gt;Error())
+            return 0;</span>
+
+<span style = "background-color:#fdd">        bool first = true;
+        while (p &amp;&amp; *p) {
+            XMLNode* node = 0;</span>
+
+<span style = "background-color:#fdd">            p = _document-&gt;Identify(p, &amp;node, first);
+            TIXMLASSERT(p);
+            if (node == 0) {
+                break;</span>
+            }
+<span style = "background-color:#fdd">            first = false;</span>
+
+<span style = "background-color:#fdd">            const int initialLineNum = node-&gt;_parseLineNum;</span>
+
+<span style = "background-color:#fdd">            StrPair endTag;
+            p = node-&gt;ParseDeep(p, &amp;endTag, curLineNumPtr);
+            if (!p) {
+                _document-&gt;DeleteNode(node);
+                if (!_document-&gt;Error()) {
+                    _document-&gt;SetError(XML_ERROR_PARSING, initialLineNum, 0);</span>
+                }
+<span style = "background-color:#fdd">                break;</span>
+            }
+
+<span style = "background-color:#fdd">            const XMLDeclaration* const decl = node-&gt;ToDeclaration();
+            if (decl) {</span>
+                // Declarations are only allowed at document level
+                //
+                // Multiple declarations are allowed but all declarations
+                // must occur before anything else. 
+                //
+                // Optimized due to a security test case. If the first node is 
+                // a declaration, and the last node is a declaration, then only 
+                // declarations have so far been added.
+<span style = "background-color:#fdd">                bool wellLocated = false;</span>
+
+<span style = "background-color:#fdd">                if (ToDocument()) {
+                    if (FirstChild()) {
+                        wellLocated =</span>
+                            FirstChild() &amp;&amp;
+                            FirstChild()-&gt;ToDeclaration() &amp;&amp;
+                            LastChild() &amp;&amp;
+                            LastChild()-&gt;ToDeclaration();
+<span style = "background-color:#fdd">                    }</span>
+                    else {
+<span style = "background-color:#fdd">                        wellLocated = true;</span>
+                    }
+                }
+<span style = "background-color:#fdd">                if (!wellLocated) {
+                    _document-&gt;SetError(XML_ERROR_PARSING_DECLARATION, initialLineNum, "XMLDeclaration value=%s", decl-&gt;Value());
+                    _document-&gt;DeleteNode(node);
+                    break;</span>
+                }
+            }
+
+<span style = "background-color:#fdd">            XMLElement* ele = node-&gt;ToElement();
+            if (ele) {</span>
+                // We read the end tag. Return it to the parent.
+<span style = "background-color:#fdd">                if (ele-&gt;ClosingType() == XMLElement::CLOSING) {
+                    if (parentEndTag) {
+                        ele-&gt;_value.TransferTo(parentEndTag);</span>
+                    }
+<span style = "background-color:#fdd">                    node-&gt;_memPool-&gt;SetTracked();   // created and then immediately deleted.
+                    DeleteNode(node);
+                    return p;</span>
+                }
+
+                // Handle an end tag returned to this level.
+                // And handle a bunch of annoying errors.
+<span style = "background-color:#fdd">                bool mismatch = false;
+                if (endTag.Empty()) {
+                    if (ele-&gt;ClosingType() == XMLElement::OPEN) {
+                        mismatch = true;</span>
+                    }
+<span style = "background-color:#fdd">                }</span>
+                else {
+<span style = "background-color:#fdd">                    if (ele-&gt;ClosingType() != XMLElement::OPEN) {
+                        mismatch = true;
+                    }
+                    else if (!XMLUtil::StringEqual(endTag.GetStr(), ele-&gt;Name())) {
+                        mismatch = true;</span>
+                    }
+                }
+<span style = "background-color:#fdd">                if (mismatch) {
+                    _document-&gt;SetError(XML_ERROR_MISMATCHED_ELEMENT, initialLineNum, "XMLElement name=%s", ele-&gt;Name());
+                    _document-&gt;DeleteNode(node);
+                    break;</span>
+                }
+            }
+<span style = "background-color:#fdd">            InsertEndChild(node);
+        }
+        return 0;
+    }</span>
+
+    /*static*/ void XMLNode::DeleteNode(XMLNode* node)
+<span style = "background-color:#fdd">    {
+        if (node == 0) {
+            return;</span>
+        }
+<span style = "background-color:#fdd">        TIXMLASSERT(node-&gt;_document);
+        if (!node-&gt;ToDocument()) {
+            node-&gt;_document-&gt;MarkInUse(node);</span>
+        }
+
+<span style = "background-color:#fdd">        MemPool* pool = node-&gt;_memPool;
+        node-&gt;~XMLNode();
+        pool-&gt;Free(node);
+    }</span>
+
+    void XMLNode::InsertChildPreamble(XMLNode* insertThis) const
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(insertThis);
+        TIXMLASSERT(insertThis-&gt;_document == _document);</span>
+
+<span style = "background-color:#fdd">        if (insertThis-&gt;_parent) {
+            insertThis-&gt;_parent-&gt;Unlink(insertThis);
+        }</span>
+        else {
+<span style = "background-color:#fdd">            insertThis-&gt;_document-&gt;MarkInUse(insertThis);
+            insertThis-&gt;_memPool-&gt;SetTracked();</span>
+        }
+<span style = "background-color:#fdd">    }</span>
+
+    const XMLElement* XMLNode::ToElementWithName(const char* name) const
+<span style = "background-color:#fdd">    {
+        const XMLElement* element = this-&gt;ToElement();
+        if (element == 0) {
+            return 0;</span>
+        }
+<span style = "background-color:#fdd">        if (name == 0) {
+            return element;</span>
+        }
+<span style = "background-color:#fdd">        if (XMLUtil::StringEqual(element-&gt;Name(), name)) {
+            return element;</span>
+        }
+<span style = "background-color:#fdd">        return 0;
+    }</span>
+
+    // --------- XMLText ---------- //
+    char* XMLText::ParseDeep(char* p, StrPair*, int* curLineNumPtr)
+<span style = "background-color:#fdd">    {
+        if (this-&gt;CData()) {
+            p = _value.ParseText(p, "]]&gt;", StrPair::NEEDS_NEWLINE_NORMALIZATION, curLineNumPtr);
+            if (!p) {
+                _document-&gt;SetError(XML_ERROR_PARSING_CDATA, _parseLineNum, 0);</span>
+            }
+<span style = "background-color:#fdd">            return p;
+        }</span>
+        else {
+<span style = "background-color:#fdd">            int flags = _document-&gt;ProcessEntities() ? StrPair::TEXT_ELEMENT : StrPair::TEXT_ELEMENT_LEAVE_ENTITIES;
+            if (_document-&gt;WhitespaceMode() == COLLAPSE_WHITESPACE) {
+                flags |= StrPair::NEEDS_WHITESPACE_COLLAPSING;</span>
+            }
+
+<span style = "background-color:#fdd">            p = _value.ParseText(p, "&lt;", flags, curLineNumPtr);
+            if (p &amp;&amp; *p) {
+                return p - 1;</span>
+            }
+<span style = "background-color:#fdd">            if (!p) {
+                _document-&gt;SetError(XML_ERROR_PARSING_TEXT, _parseLineNum, 0);</span>
+            }
+        }
+<span style = "background-color:#fdd">        return 0;
+    }</span>
+
+
+    XMLNode* XMLText::ShallowClone(XMLDocument* doc) const
+<span style = "background-color:#fdd">    {
+        if (!doc) {
+            doc = _document;</span>
+        }
+<span style = "background-color:#fdd">        XMLText* text = doc-&gt;NewText(Value());	// fixme: this will always allocate memory. Intern?
+        text-&gt;SetCData(this-&gt;CData());
+        return text;
+    }</span>
+
+
+    bool XMLText::ShallowEqual(const XMLNode* compare) const
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(compare);
+        const XMLText* text = compare-&gt;ToText();
+        return (text &amp;&amp; XMLUtil::StringEqual(text-&gt;Value(), Value()));
+    }</span>
+
+
+    bool XMLText::Accept(XMLVisitor* visitor) const
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(visitor);
+        return visitor-&gt;Visit(*this);
+    }</span>
+
+
+    // --------- XMLComment ---------- //
+
+<span style = "background-color:#fdd">    XMLComment::XMLComment(XMLDocument* doc) : XMLNode(doc)
+    {
+    }</span>
+
+
+    XMLComment::~XMLComment()
+<span style = "background-color:#fdd">    {
+    }</span>
+
+
+    char* XMLComment::ParseDeep(char* p, StrPair*, int* curLineNumPtr)
+<span style = "background-color:#fdd">    {</span>
+        // Comment parses as text.
+<span style = "background-color:#fdd">        p = _value.ParseText(p, "--&gt;", StrPair::COMMENT, curLineNumPtr);
+        if (p == 0) {
+            _document-&gt;SetError(XML_ERROR_PARSING_COMMENT, _parseLineNum, 0);</span>
+        }
+<span style = "background-color:#fdd">        return p;
+    }</span>
+
+
+    XMLNode* XMLComment::ShallowClone(XMLDocument* doc) const
+<span style = "background-color:#fdd">    {
+        if (!doc) {
+            doc = _document;</span>
+        }
+<span style = "background-color:#fdd">        XMLComment* comment = doc-&gt;NewComment(Value());	// fixme: this will always allocate memory. Intern?
+        return comment;
+    }</span>
+
+
+    bool XMLComment::ShallowEqual(const XMLNode* compare) const
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(compare);
+        const XMLComment* comment = compare-&gt;ToComment();
+        return (comment &amp;&amp; XMLUtil::StringEqual(comment-&gt;Value(), Value()));
+    }</span>
+
+
+    bool XMLComment::Accept(XMLVisitor* visitor) const
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(visitor);
+        return visitor-&gt;Visit(*this);
+    }</span>
+
+
+    // --------- XMLDeclaration ---------- //
+
+<span style = "background-color:#fdd">    XMLDeclaration::XMLDeclaration(XMLDocument* doc) : XMLNode(doc)
+    {
+    }</span>
+
+
+    XMLDeclaration::~XMLDeclaration()
+<span style = "background-color:#fdd">    {</span>
+        //printf( "~XMLDeclaration\n" );
+<span style = "background-color:#fdd">    }</span>
+
+
+    char* XMLDeclaration::ParseDeep(char* p, StrPair*, int* curLineNumPtr)
+<span style = "background-color:#fdd">    {</span>
+        // Declaration parses as text.
+<span style = "background-color:#fdd">        p = _value.ParseText(p, "?&gt;", StrPair::NEEDS_NEWLINE_NORMALIZATION, curLineNumPtr);
+        if (p == 0) {
+            _document-&gt;SetError(XML_ERROR_PARSING_DECLARATION, _parseLineNum, 0);</span>
+        }
+<span style = "background-color:#fdd">        return p;
+    }</span>
+
+
+    XMLNode* XMLDeclaration::ShallowClone(XMLDocument* doc) const
+<span style = "background-color:#fdd">    {
+        if (!doc) {
+            doc = _document;</span>
+        }
+<span style = "background-color:#fdd">        XMLDeclaration* dec = doc-&gt;NewDeclaration(Value());	// fixme: this will always allocate memory. Intern?
+        return dec;
+    }</span>
+
+
+    bool XMLDeclaration::ShallowEqual(const XMLNode* compare) const
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(compare);
+        const XMLDeclaration* declaration = compare-&gt;ToDeclaration();
+        return (declaration &amp;&amp; XMLUtil::StringEqual(declaration-&gt;Value(), Value()));
+    }</span>
+
+
+
+    bool XMLDeclaration::Accept(XMLVisitor* visitor) const
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(visitor);
+        return visitor-&gt;Visit(*this);
+    }</span>
+
+    // --------- XMLUnknown ---------- //
+
+<span style = "background-color:#fdd">    XMLUnknown::XMLUnknown(XMLDocument* doc) : XMLNode(doc)
+    {
+    }</span>
+
+
+    XMLUnknown::~XMLUnknown()
+<span style = "background-color:#fdd">    {
+    }</span>
+
+
+    char* XMLUnknown::ParseDeep(char* p, StrPair*, int* curLineNumPtr)
+<span style = "background-color:#fdd">    {</span>
+        // Unknown parses as text.
+<span style = "background-color:#fdd">        p = _value.ParseText(p, "&gt;", StrPair::NEEDS_NEWLINE_NORMALIZATION, curLineNumPtr);
+        if (!p) {
+            _document-&gt;SetError(XML_ERROR_PARSING_UNKNOWN, _parseLineNum, 0);</span>
+        }
+<span style = "background-color:#fdd">        return p;
+    }</span>
+
+
+    XMLNode* XMLUnknown::ShallowClone(XMLDocument* doc) const
+<span style = "background-color:#fdd">    {
+        if (!doc) {
+            doc = _document;</span>
+        }
+<span style = "background-color:#fdd">        XMLUnknown* text = doc-&gt;NewUnknown(Value());	// fixme: this will always allocate memory. Intern?
+        return text;
+    }</span>
+
+
+    bool XMLUnknown::ShallowEqual(const XMLNode* compare) const
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(compare);
+        const XMLUnknown* unknown = compare-&gt;ToUnknown();
+        return (unknown &amp;&amp; XMLUtil::StringEqual(unknown-&gt;Value(), Value()));
+    }</span>
+
+
+    bool XMLUnknown::Accept(XMLVisitor* visitor) const
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(visitor);
+        return visitor-&gt;Visit(*this);
+    }</span>
+
+    // --------- XMLAttribute ---------- //
+
+    const char* XMLAttribute::Name() const
+<span style = "background-color:#fdd">    {
+        return _name.GetStr();
+    }</span>
+
+    const char* XMLAttribute::Value() const
+<span style = "background-color:#fdd">    {
+        return _value.GetStr();
+    }</span>
+
+    char* XMLAttribute::ParseDeep(char* p, bool processEntities, int* curLineNumPtr)
+<span style = "background-color:#fdd">    {</span>
+        // Parse using the name rules: bug fix, was using ParseText before
+<span style = "background-color:#fdd">        p = _name.ParseName(p);
+        if (!p || !*p) {
+            return 0;</span>
+        }
+
+        // Skip white space before =
+<span style = "background-color:#fdd">        p = XMLUtil::SkipWhiteSpace(p, curLineNumPtr);
+        if (*p != '=') {
+            return 0;</span>
+        }
+
+<span style = "background-color:#fdd">        ++p;	// move up to opening quote
+        p = XMLUtil::SkipWhiteSpace(p, curLineNumPtr);
+        if (*p != '\"' &amp;&amp; *p != '\'') {
+            return 0;</span>
+        }
+
+<span style = "background-color:#fdd">        const char endTag[2] = { *p, 0 };
+        ++p;	// move past opening quote</span>
+
+<span style = "background-color:#fdd">        p = _value.ParseText(p, endTag, processEntities ? StrPair::ATTRIBUTE_VALUE : StrPair::ATTRIBUTE_VALUE_LEAVE_ENTITIES, curLineNumPtr);
+        return p;
+    }</span>
+
+
+    void XMLAttribute::SetName(const char* n)
+<span style = "background-color:#fdd">    {
+        _name.SetStr(n);
+    }</span>
+
+
+    XMLError XMLAttribute::QueryIntValue(int* value) const
+<span style = "background-color:#fdd">    {
+        if (XMLUtil::ToInt(Value(), value)) {
+            return XML_SUCCESS;</span>
+        }
+<span style = "background-color:#fdd">        return XML_WRONG_ATTRIBUTE_TYPE;
+    }</span>
+
+
+    XMLError XMLAttribute::QueryUnsignedValue(unsigned int* value) const
+<span style = "background-color:#fdd">    {
+        if (XMLUtil::ToUnsigned(Value(), value)) {
+            return XML_SUCCESS;</span>
+        }
+<span style = "background-color:#fdd">        return XML_WRONG_ATTRIBUTE_TYPE;
+    }</span>
+
+
+    XMLError XMLAttribute::QueryInt64Value(int64_t* value) const
+<span style = "background-color:#fdd">    {
+        if (XMLUtil::ToInt64(Value(), value)) {
+            return XML_SUCCESS;</span>
+        }
+<span style = "background-color:#fdd">        return XML_WRONG_ATTRIBUTE_TYPE;
+    }</span>
+
+
+    XMLError XMLAttribute::QueryUnsigned64Value(uint64_t* value) const
+<span style = "background-color:#fdd">    {
+        if (XMLUtil::ToUnsigned64(Value(), value)) {
+            return XML_SUCCESS;</span>
+        }
+<span style = "background-color:#fdd">        return XML_WRONG_ATTRIBUTE_TYPE;
+    }</span>
+
+
+    XMLError XMLAttribute::QueryBoolValue(bool* value) const
+<span style = "background-color:#fdd">    {
+        if (XMLUtil::ToBool(Value(), value)) {
+            return XML_SUCCESS;</span>
+        }
+<span style = "background-color:#fdd">        return XML_WRONG_ATTRIBUTE_TYPE;
+    }</span>
+
+
+    XMLError XMLAttribute::QueryFloatValue(float* value) const
+<span style = "background-color:#fdd">    {
+        if (XMLUtil::ToFloat(Value(), value)) {
+            return XML_SUCCESS;</span>
+        }
+<span style = "background-color:#fdd">        return XML_WRONG_ATTRIBUTE_TYPE;
+    }</span>
+
+
+    XMLError XMLAttribute::QueryDoubleValue(double* value) const
+<span style = "background-color:#fdd">    {
+        if (XMLUtil::ToDouble(Value(), value)) {
+            return XML_SUCCESS;</span>
+        }
+<span style = "background-color:#fdd">        return XML_WRONG_ATTRIBUTE_TYPE;
+    }</span>
+
+
+    void XMLAttribute::SetAttribute(const char* v)
+<span style = "background-color:#fdd">    {
+        _value.SetStr(v);
+    }</span>
+
+
+    void XMLAttribute::SetAttribute(int v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        _value.SetStr(buf);
+    }</span>
+
+
+    void XMLAttribute::SetAttribute(unsigned v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        _value.SetStr(buf);
+    }</span>
+
+
+    void XMLAttribute::SetAttribute(int64_t v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        _value.SetStr(buf);
+    }</span>
+
+    void XMLAttribute::SetAttribute(uint64_t v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        _value.SetStr(buf);
+    }</span>
+
+
+    void XMLAttribute::SetAttribute(bool v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        _value.SetStr(buf);
+    }</span>
+
+    void XMLAttribute::SetAttribute(double v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        _value.SetStr(buf);
+    }</span>
+
+    void XMLAttribute::SetAttribute(float v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        _value.SetStr(buf);
+    }</span>
+
+
+    // --------- XMLElement ---------- //
+<span style = "background-color:#fdd">    XMLElement::XMLElement(XMLDocument* doc) : XMLNode(doc),
+        _closingType(OPEN),
+        _rootAttribute(0)
+    {
+    }</span>
+
+
+    XMLElement::~XMLElement()
+<span style = "background-color:#fdd">    {
+        while (_rootAttribute) {
+            XMLAttribute* next = _rootAttribute-&gt;_next;
+            DeleteAttribute(_rootAttribute);
+            _rootAttribute = next;
+        }
+    }</span>
+
+
+    const XMLAttribute* XMLElement::FindAttribute(const char* name) const
+<span style = "background-color:#fdd">    {
+        for (XMLAttribute* a = _rootAttribute; a; a = a-&gt;_next) {
+            if (XMLUtil::StringEqual(a-&gt;Name(), name)) {
+                return a;</span>
+            }
+<span style = "background-color:#fdd">        }
+        return 0;
+    }</span>
+
+
+    const char* XMLElement::Attribute(const char* name, const char* value) const
+<span style = "background-color:#fdd">    {
+        const XMLAttribute* a = FindAttribute(name);
+        if (!a) {
+            return 0;</span>
+        }
+<span style = "background-color:#fdd">        if (!value || XMLUtil::StringEqual(a-&gt;Value(), value)) {
+            return a-&gt;Value();</span>
+        }
+<span style = "background-color:#fdd">        return 0;
+    }</span>
+
+    int XMLElement::IntAttribute(const char* name, int defaultValue) const
+<span style = "background-color:#fdd">    {
+        int i = defaultValue;
+        QueryIntAttribute(name, &amp;i);
+        return i;
+    }</span>
+
+    unsigned XMLElement::UnsignedAttribute(const char* name, unsigned defaultValue) const
+<span style = "background-color:#fdd">    {
+        unsigned i = defaultValue;
+        QueryUnsignedAttribute(name, &amp;i);
+        return i;
+    }</span>
+
+    int64_t XMLElement::Int64Attribute(const char* name, int64_t defaultValue) const
+<span style = "background-color:#fdd">    {
+        int64_t i = defaultValue;
+        QueryInt64Attribute(name, &amp;i);
+        return i;
+    }</span>
+
+    uint64_t XMLElement::Unsigned64Attribute(const char* name, uint64_t defaultValue) const
+<span style = "background-color:#fdd">    {
+        uint64_t i = defaultValue;
+        QueryUnsigned64Attribute(name, &amp;i);
+        return i;
+    }</span>
+
+    bool XMLElement::BoolAttribute(const char* name, bool defaultValue) const
+<span style = "background-color:#fdd">    {
+        bool b = defaultValue;
+        QueryBoolAttribute(name, &amp;b);
+        return b;
+    }</span>
+
+    double XMLElement::DoubleAttribute(const char* name, double defaultValue) const
+<span style = "background-color:#fdd">    {
+        double d = defaultValue;
+        QueryDoubleAttribute(name, &amp;d);
+        return d;
+    }</span>
+
+    float XMLElement::FloatAttribute(const char* name, float defaultValue) const
+<span style = "background-color:#fdd">    {
+        float f = defaultValue;
+        QueryFloatAttribute(name, &amp;f);
+        return f;
+    }</span>
+
+    const char* XMLElement::GetText() const
+<span style = "background-color:#fdd">    {</span>
+        /* skip comment node */
+<span style = "background-color:#fdd">        const XMLNode* node = FirstChild();
+        while (node) {
+            if (node-&gt;ToComment()) {
+                node = node-&gt;NextSibling();
+                continue;</span>
+            }
+<span style = "background-color:#fdd">            break;
+        }</span>
+
+<span style = "background-color:#fdd">        if (node &amp;&amp; node-&gt;ToText()) {
+            return node-&gt;Value();</span>
+        }
+<span style = "background-color:#fdd">        return 0;
+    }</span>
+
+
+    void	XMLElement::SetText(const char* inText)
+<span style = "background-color:#fdd">    {
+        if (FirstChild() &amp;&amp; FirstChild()-&gt;ToText())
+            FirstChild()-&gt;SetValue(inText);</span>
+        else {
+<span style = "background-color:#fdd">            XMLText* theText = GetDocument()-&gt;NewText(inText);
+            InsertFirstChild(theText);</span>
+        }
+<span style = "background-color:#fdd">    }</span>
+
+
+    void XMLElement::SetText(int v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        SetText(buf);
+    }</span>
+
+
+    void XMLElement::SetText(unsigned v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        SetText(buf);
+    }</span>
+
+
+    void XMLElement::SetText(int64_t v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        SetText(buf);
+    }</span>
+
+<span style = "background-color:#fdd">    void XMLElement::SetText(uint64_t v) {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        SetText(buf);
+    }</span>
+
+
+    void XMLElement::SetText(bool v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        SetText(buf);
+    }</span>
+
+
+    void XMLElement::SetText(float v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        SetText(buf);
+    }</span>
+
+
+    void XMLElement::SetText(double v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        SetText(buf);
+    }</span>
+
+
+    XMLError XMLElement::QueryIntText(int* ival) const
+<span style = "background-color:#fdd">    {
+        if (FirstChild() &amp;&amp; FirstChild()-&gt;ToText()) {
+            const char* t = FirstChild()-&gt;Value();
+            if (XMLUtil::ToInt(t, ival)) {
+                return XML_SUCCESS;</span>
+            }
+<span style = "background-color:#fdd">            return XML_CAN_NOT_CONVERT_TEXT;</span>
+        }
+<span style = "background-color:#fdd">        return XML_NO_TEXT_NODE;
+    }</span>
+
+
+    XMLError XMLElement::QueryUnsignedText(unsigned* uval) const
+<span style = "background-color:#fdd">    {
+        if (FirstChild() &amp;&amp; FirstChild()-&gt;ToText()) {
+            const char* t = FirstChild()-&gt;Value();
+            if (XMLUtil::ToUnsigned(t, uval)) {
+                return XML_SUCCESS;</span>
+            }
+<span style = "background-color:#fdd">            return XML_CAN_NOT_CONVERT_TEXT;</span>
+        }
+<span style = "background-color:#fdd">        return XML_NO_TEXT_NODE;
+    }</span>
+
+
+    XMLError XMLElement::QueryInt64Text(int64_t* ival) const
+<span style = "background-color:#fdd">    {
+        if (FirstChild() &amp;&amp; FirstChild()-&gt;ToText()) {
+            const char* t = FirstChild()-&gt;Value();
+            if (XMLUtil::ToInt64(t, ival)) {
+                return XML_SUCCESS;</span>
+            }
+<span style = "background-color:#fdd">            return XML_CAN_NOT_CONVERT_TEXT;</span>
+        }
+<span style = "background-color:#fdd">        return XML_NO_TEXT_NODE;
+    }</span>
+
+
+    XMLError XMLElement::QueryUnsigned64Text(uint64_t* uval) const
+<span style = "background-color:#fdd">    {
+        if (FirstChild() &amp;&amp; FirstChild()-&gt;ToText()) {
+            const char* t = FirstChild()-&gt;Value();
+            if (XMLUtil::ToUnsigned64(t, uval)) {
+                return XML_SUCCESS;</span>
+            }
+<span style = "background-color:#fdd">            return XML_CAN_NOT_CONVERT_TEXT;</span>
+        }
+<span style = "background-color:#fdd">        return XML_NO_TEXT_NODE;
+    }</span>
+
+
+    XMLError XMLElement::QueryBoolText(bool* bval) const
+<span style = "background-color:#fdd">    {
+        if (FirstChild() &amp;&amp; FirstChild()-&gt;ToText()) {
+            const char* t = FirstChild()-&gt;Value();
+            if (XMLUtil::ToBool(t, bval)) {
+                return XML_SUCCESS;</span>
+            }
+<span style = "background-color:#fdd">            return XML_CAN_NOT_CONVERT_TEXT;</span>
+        }
+<span style = "background-color:#fdd">        return XML_NO_TEXT_NODE;
+    }</span>
+
+
+    XMLError XMLElement::QueryDoubleText(double* dval) const
+<span style = "background-color:#fdd">    {
+        if (FirstChild() &amp;&amp; FirstChild()-&gt;ToText()) {
+            const char* t = FirstChild()-&gt;Value();
+            if (XMLUtil::ToDouble(t, dval)) {
+                return XML_SUCCESS;</span>
+            }
+<span style = "background-color:#fdd">            return XML_CAN_NOT_CONVERT_TEXT;</span>
+        }
+<span style = "background-color:#fdd">        return XML_NO_TEXT_NODE;
+    }</span>
+
+
+    XMLError XMLElement::QueryFloatText(float* fval) const
+<span style = "background-color:#fdd">    {
+        if (FirstChild() &amp;&amp; FirstChild()-&gt;ToText()) {
+            const char* t = FirstChild()-&gt;Value();
+            if (XMLUtil::ToFloat(t, fval)) {
+                return XML_SUCCESS;</span>
+            }
+<span style = "background-color:#fdd">            return XML_CAN_NOT_CONVERT_TEXT;</span>
+        }
+<span style = "background-color:#fdd">        return XML_NO_TEXT_NODE;
+    }</span>
+
+    int XMLElement::IntText(int defaultValue) const
+<span style = "background-color:#fdd">    {
+        int i = defaultValue;
+        QueryIntText(&amp;i);
+        return i;
+    }</span>
+
+    unsigned XMLElement::UnsignedText(unsigned defaultValue) const
+<span style = "background-color:#fdd">    {
+        unsigned i = defaultValue;
+        QueryUnsignedText(&amp;i);
+        return i;
+    }</span>
+
+    int64_t XMLElement::Int64Text(int64_t defaultValue) const
+<span style = "background-color:#fdd">    {
+        int64_t i = defaultValue;
+        QueryInt64Text(&amp;i);
+        return i;
+    }</span>
+
+    uint64_t XMLElement::Unsigned64Text(uint64_t defaultValue) const
+<span style = "background-color:#fdd">    {
+        uint64_t i = defaultValue;
+        QueryUnsigned64Text(&amp;i);
+        return i;
+    }</span>
+
+    bool XMLElement::BoolText(bool defaultValue) const
+<span style = "background-color:#fdd">    {
+        bool b = defaultValue;
+        QueryBoolText(&amp;b);
+        return b;
+    }</span>
+
+    double XMLElement::DoubleText(double defaultValue) const
+<span style = "background-color:#fdd">    {
+        double d = defaultValue;
+        QueryDoubleText(&amp;d);
+        return d;
+    }</span>
+
+    float XMLElement::FloatText(float defaultValue) const
+<span style = "background-color:#fdd">    {
+        float f = defaultValue;
+        QueryFloatText(&amp;f);
+        return f;
+    }</span>
+
+
+    XMLAttribute* XMLElement::FindOrCreateAttribute(const char* name)
+<span style = "background-color:#fdd">    {
+        XMLAttribute* last = 0;
+        XMLAttribute* attrib = 0;
+        for (attrib = _rootAttribute;
+            attrib;
+            last = attrib, attrib = attrib-&gt;_next) {
+            if (XMLUtil::StringEqual(attrib-&gt;Name(), name)) {
+                break;</span>
+            }
+<span style = "background-color:#fdd">        }
+        if (!attrib) {
+            attrib = CreateAttribute();
+            TIXMLASSERT(attrib);
+            if (last) {
+                TIXMLASSERT(last-&gt;_next == 0);
+                last-&gt;_next = attrib;
+            }</span>
+            else {
+<span style = "background-color:#fdd">                TIXMLASSERT(_rootAttribute == 0);
+                _rootAttribute = attrib;</span>
+            }
+<span style = "background-color:#fdd">            attrib-&gt;SetName(name);</span>
+        }
+<span style = "background-color:#fdd">        return attrib;
+    }</span>
+
+
+    void XMLElement::DeleteAttribute(const char* name)
+<span style = "background-color:#fdd">    {
+        XMLAttribute* prev = 0;
+        for (XMLAttribute* a = _rootAttribute; a; a = a-&gt;_next) {
+            if (XMLUtil::StringEqual(name, a-&gt;Name())) {
+                if (prev) {
+                    prev-&gt;_next = a-&gt;_next;
+                }</span>
+                else {
+<span style = "background-color:#fdd">                    _rootAttribute = a-&gt;_next;</span>
+                }
+<span style = "background-color:#fdd">                DeleteAttribute(a);
+                break;</span>
+            }
+<span style = "background-color:#fdd">            prev = a;
+        }
+    }</span>
+
+
+    char* XMLElement::ParseAttributes(char* p, int* curLineNumPtr)
+<span style = "background-color:#fdd">    {
+        XMLAttribute* prevAttribute = 0;</span>
+
+        // Read the attributes.
+<span style = "background-color:#fdd">        while (p) {
+            p = XMLUtil::SkipWhiteSpace(p, curLineNumPtr);
+            if (!(*p)) {
+                _document-&gt;SetError(XML_ERROR_PARSING_ELEMENT, _parseLineNum, "XMLElement name=%s", Name());
+                return 0;</span>
+            }
+
+            // attribute.
+<span style = "background-color:#fdd">            if (XMLUtil::IsNameStartChar(static_cast&lt;unsigned char&gt;(*p))) {
+                XMLAttribute* attrib = CreateAttribute();
+                TIXMLASSERT(attrib);
+                attrib-&gt;_parseLineNum = _document-&gt;_parseCurLineNum;</span>
+
+<span style = "background-color:#fdd">                const int attrLineNum = attrib-&gt;_parseLineNum;</span>
+
+<span style = "background-color:#fdd">                p = attrib-&gt;ParseDeep(p, _document-&gt;ProcessEntities(), curLineNumPtr);
+                if (!p || Attribute(attrib-&gt;Name())) {
+                    DeleteAttribute(attrib);
+                    _document-&gt;SetError(XML_ERROR_PARSING_ATTRIBUTE, attrLineNum, "XMLElement name=%s", Name());
+                    return 0;</span>
+                }
+                // There is a minor bug here: if the attribute in the source xml
+                // document is duplicated, it will not be detected and the
+                // attribute will be doubly added. However, tracking the 'prevAttribute'
+                // avoids re-scanning the attribute list. Preferring performance for
+                // now, may reconsider in the future.
+<span style = "background-color:#fdd">                if (prevAttribute) {
+                    TIXMLASSERT(prevAttribute-&gt;_next == 0);
+                    prevAttribute-&gt;_next = attrib;
+                }</span>
+                else {
+<span style = "background-color:#fdd">                    TIXMLASSERT(_rootAttribute == 0);
+                    _rootAttribute = attrib;</span>
+                }
+<span style = "background-color:#fdd">                prevAttribute = attrib;
+            }</span>
+            // end of the tag
+<span style = "background-color:#fdd">            else if (*p == '&gt;') {
+                ++p;
+                break;
+            }</span>
+            // end of the tag
+<span style = "background-color:#fdd">            else if (*p == '/' &amp;&amp; *(p + 1) == '&gt;') {
+                _closingType = CLOSED;
+                return p + 2;	// done; sealed element.
+            }</span>
+            else {
+<span style = "background-color:#fdd">                _document-&gt;SetError(XML_ERROR_PARSING_ELEMENT, _parseLineNum, 0);
+                return 0;</span>
+            }
+<span style = "background-color:#fdd">        }
+        return p;
+    }</span>
+
+    void XMLElement::DeleteAttribute(XMLAttribute* attribute)
+<span style = "background-color:#fdd">    {
+        if (attribute == 0) {
+            return;</span>
+        }
+<span style = "background-color:#fdd">        MemPool* pool = attribute-&gt;_memPool;
+        attribute-&gt;~XMLAttribute();
+        pool-&gt;Free(attribute);
+    }</span>
+
+    XMLAttribute* XMLElement::CreateAttribute()
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(sizeof(XMLAttribute) == _document-&gt;_attributePool.ItemSize());
+        XMLAttribute* attrib = new (_document-&gt;_attributePool.Alloc()) XMLAttribute();
+        TIXMLASSERT(attrib);
+        attrib-&gt;_memPool = &amp;_document-&gt;_attributePool;
+        attrib-&gt;_memPool-&gt;SetTracked();
+        return attrib;
+    }</span>
+
+
+    XMLElement* XMLElement::InsertNewChildElement(const char* name)
+<span style = "background-color:#fdd">    {
+        XMLElement* node = _document-&gt;NewElement(name);
+        return InsertEndChild(node) ? node : 0;
+    }</span>
+
+    XMLComment* XMLElement::InsertNewComment(const char* comment)
+<span style = "background-color:#fdd">    {
+        XMLComment* node = _document-&gt;NewComment(comment);
+        return InsertEndChild(node) ? node : 0;
+    }</span>
+
+    XMLText* XMLElement::InsertNewText(const char* text)
+<span style = "background-color:#fdd">    {
+        XMLText* node = _document-&gt;NewText(text);
+        return InsertEndChild(node) ? node : 0;
+    }</span>
+
+    XMLDeclaration* XMLElement::InsertNewDeclaration(const char* text)
+<span style = "background-color:#fdd">    {
+        XMLDeclaration* node = _document-&gt;NewDeclaration(text);
+        return InsertEndChild(node) ? node : 0;
+    }</span>
+
+    XMLUnknown* XMLElement::InsertNewUnknown(const char* text)
+<span style = "background-color:#fdd">    {
+        XMLUnknown* node = _document-&gt;NewUnknown(text);
+        return InsertEndChild(node) ? node : 0;
+    }</span>
+
+
+
+    //
+    //	&lt;ele&gt;&lt;/ele&gt;
+    //	&lt;ele&gt;foo&lt;b&gt;bar&lt;/b&gt;&lt;/ele&gt;
+    //
+    char* XMLElement::ParseDeep(char* p, StrPair* parentEndTag, int* curLineNumPtr)
+<span style = "background-color:#fdd">    {</span>
+        // Read the element name.
+<span style = "background-color:#fdd">        p = XMLUtil::SkipWhiteSpace(p, curLineNumPtr);</span>
+
+        // The closing element is the &lt;/element&gt; form. It is
+        // parsed just like a regular element then deleted from
+        // the DOM.
+<span style = "background-color:#fdd">        if (*p == '/') {
+            _closingType = CLOSING;
+            ++p;</span>
+        }
+
+<span style = "background-color:#fdd">        p = _value.ParseName(p);
+        if (_value.Empty()) {
+            return 0;</span>
+        }
+
+<span style = "background-color:#fdd">        p = ParseAttributes(p, curLineNumPtr);
+        if (!p || !*p || _closingType != OPEN) {
+            return p;</span>
+        }
+
+<span style = "background-color:#fdd">        p = XMLNode::ParseDeep(p, parentEndTag, curLineNumPtr);
+        return p;
+    }</span>
+
+
+
+    XMLNode* XMLElement::ShallowClone(XMLDocument* doc) const
+<span style = "background-color:#fdd">    {
+        if (!doc) {
+            doc = _document;</span>
+        }
+<span style = "background-color:#fdd">        XMLElement* element = doc-&gt;NewElement(Value());					// fixme: this will always allocate memory. Intern?
+        for (const XMLAttribute* a = FirstAttribute(); a; a = a-&gt;Next()) {
+            element-&gt;SetAttribute(a-&gt;Name(), a-&gt;Value());					// fixme: this will always allocate memory. Intern?
+        }
+        return element;
+    }</span>
+
+
+    bool XMLElement::ShallowEqual(const XMLNode* compare) const
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(compare);
+        const XMLElement* other = compare-&gt;ToElement();
+        if (other &amp;&amp; XMLUtil::StringEqual(other-&gt;Name(), Name())) {</span>
+
+<span style = "background-color:#fdd">            const XMLAttribute* a = FirstAttribute();
+            const XMLAttribute* b = other-&gt;FirstAttribute();</span>
+
+<span style = "background-color:#fdd">            while (a &amp;&amp; b) {
+                if (!XMLUtil::StringEqual(a-&gt;Value(), b-&gt;Value())) {
+                    return false;</span>
+                }
+<span style = "background-color:#fdd">                a = a-&gt;Next();
+                b = b-&gt;Next();
+            }
+            if (a || b) {</span>
+                // different count
+<span style = "background-color:#fdd">                return false;</span>
+            }
+<span style = "background-color:#fdd">            return true;</span>
+        }
+<span style = "background-color:#fdd">        return false;
+    }</span>
+
+
+    bool XMLElement::Accept(XMLVisitor* visitor) const
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(visitor);
+        if (visitor-&gt;VisitEnter(*this, _rootAttribute)) {
+            for (const XMLNode* node = FirstChild(); node; node = node-&gt;NextSibling()) {
+                if (!node-&gt;Accept(visitor)) {
+                    break;</span>
+                }
+<span style = "background-color:#fdd">            }</span>
+        }
+<span style = "background-color:#fdd">        return visitor-&gt;VisitExit(*this);
+    }</span>
+
+
+    // --------- XMLDocument ----------- //
+
+    // Warning: List must match 'enum XMLError'
+    const char* XMLDocument::_errorNames[XML_ERROR_COUNT] = {
+        "XML_SUCCESS",
+        "XML_NO_ATTRIBUTE",
+        "XML_WRONG_ATTRIBUTE_TYPE",
+        "XML_ERROR_FILE_NOT_FOUND",
+        "XML_ERROR_FILE_COULD_NOT_BE_OPENED",
+        "XML_ERROR_FILE_READ_ERROR",
+        "XML_ERROR_PARSING_ELEMENT",
+        "XML_ERROR_PARSING_ATTRIBUTE",
+        "XML_ERROR_PARSING_TEXT",
+        "XML_ERROR_PARSING_CDATA",
+        "XML_ERROR_PARSING_COMMENT",
+        "XML_ERROR_PARSING_DECLARATION",
+        "XML_ERROR_PARSING_UNKNOWN",
+        "XML_ERROR_EMPTY_DOCUMENT",
+        "XML_ERROR_MISMATCHED_ELEMENT",
+        "XML_ERROR_PARSING",
+        "XML_CAN_NOT_CONVERT_TEXT",
+        "XML_NO_TEXT_NODE",
+        "XML_ELEMENT_DEPTH_EXCEEDED"
+    };
+
+
+    XMLDocument::XMLDocument(bool processEntities, Whitespace whitespaceMode) :
+<span style = "background-color:#fdd">        XMLNode(0),
+        _writeBOM(false),
+        _processEntities(processEntities),
+        _errorID(XML_SUCCESS),
+        _whitespaceMode(whitespaceMode),
+        _errorStr(),
+        _errorLineNum(0),
+        _charBuffer(0),
+        _parseCurLineNum(0),
+        _parsingDepth(0),
+        _unlinked(),
+        _elementPool(),
+        _attributePool(),
+        _textPool(),
+        _commentPool()
+    {</span>
+        // avoid VC++ C4355 warning about 'this' in initializer list (C4355 is off by default in VS2012+)
+<span style = "background-color:#fdd">        _document = this;
+    }</span>
+
+
+    XMLDocument::~XMLDocument()
+<span style = "background-color:#fdd">    {
+        Clear();
+    }</span>
+
+
+    void XMLDocument::MarkInUse(const XMLNode* const node)
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(node);
+        TIXMLASSERT(node-&gt;_parent == 0);</span>
+
+<span style = "background-color:#fdd">        for (size_t i = 0; i &lt; _unlinked.Size(); ++i) {
+            if (node == _unlinked[i]) {
+                _unlinked.SwapRemove(i);
+                break;</span>
+            }
+<span style = "background-color:#fdd">        }
+    }</span>
+
+    void XMLDocument::Clear()
+<span style = "background-color:#fdd">    {
+        DeleteChildren();
+        while (_unlinked.Size()) {
+            DeleteNode(_unlinked[0]);	// Will remove from _unlinked as part of delete.
+        }</span>
+
+#ifdef TINYXML2_DEBUG
+<span style = "background-color:#fdd">        const bool hadError = Error();</span>
+#endif
+<span style = "background-color:#fdd">        ClearError();</span>
+
+<span style = "background-color:#fdd">        delete[] _charBuffer;
+        _charBuffer = 0;
+        _parsingDepth = 0;</span>
+
+#if 0
+        _textPool.Trace("text");
+        _elementPool.Trace("element");
+        _commentPool.Trace("comment");
+        _attributePool.Trace("attribute");
+#endif
+
+#ifdef TINYXML2_DEBUG
+<span style = "background-color:#fdd">        if (!hadError) {
+            TIXMLASSERT(_elementPool.CurrentAllocs() == _elementPool.Untracked());
+            TIXMLASSERT(_attributePool.CurrentAllocs() == _attributePool.Untracked());
+            TIXMLASSERT(_textPool.CurrentAllocs() == _textPool.Untracked());
+            TIXMLASSERT(_commentPool.CurrentAllocs() == _commentPool.Untracked());</span>
+        }
+#endif
+<span style = "background-color:#fdd">    }</span>
+
+
+    void XMLDocument::DeepCopy(XMLDocument* target) const
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(target);
+        if (target == this) {
+            return; // technically success - a no-op.</span>
+        }
+
+<span style = "background-color:#fdd">        target-&gt;Clear();
+        for (const XMLNode* node = this-&gt;FirstChild(); node; node = node-&gt;NextSibling()) {
+            target-&gt;InsertEndChild(node-&gt;DeepClone(target));
+        }
+    }</span>
+
+    XMLElement* XMLDocument::NewElement(const char* name)
+<span style = "background-color:#fdd">    {
+        XMLElement* ele = CreateUnlinkedNode&lt;XMLElement&gt;(_elementPool);
+        ele-&gt;SetName(name);
+        return ele;
+    }</span>
+
+
+    XMLComment* XMLDocument::NewComment(const char* str)
+<span style = "background-color:#fdd">    {
+        XMLComment* comment = CreateUnlinkedNode&lt;XMLComment&gt;(_commentPool);
+        comment-&gt;SetValue(str);
+        return comment;
+    }</span>
+
+
+    XMLText* XMLDocument::NewText(const char* str)
+<span style = "background-color:#fdd">    {
+        XMLText* text = CreateUnlinkedNode&lt;XMLText&gt;(_textPool);
+        text-&gt;SetValue(str);
+        return text;
+    }</span>
+
+
+    XMLDeclaration* XMLDocument::NewDeclaration(const char* str)
+<span style = "background-color:#fdd">    {
+        XMLDeclaration* dec = CreateUnlinkedNode&lt;XMLDeclaration&gt;(_commentPool);
+        dec-&gt;SetValue(str ? str : "xml version=\"1.0\" encoding=\"UTF-8\"");
+        return dec;
+    }</span>
+
+
+    XMLUnknown* XMLDocument::NewUnknown(const char* str)
+<span style = "background-color:#fdd">    {
+        XMLUnknown* unk = CreateUnlinkedNode&lt;XMLUnknown&gt;(_commentPool);
+        unk-&gt;SetValue(str);
+        return unk;
+    }</span>
+
+    static FILE* callfopen(const char* filepath, const char* mode)
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(filepath);
+        TIXMLASSERT(mode);</span>
+#if defined(_MSC_VER) &amp;&amp; (_MSC_VER &gt;= 1400 ) &amp;&amp; (!defined WINCE)
+<span style = "background-color:#fdd">        FILE* fp = 0;
+        const errno_t err = fopen_s(&amp;fp, filepath, mode);
+        if (err) {
+            return 0;</span>
+        }
+#else
+        FILE* fp = fopen(filepath, mode);
+#endif
+<span style = "background-color:#fdd">        return fp;
+    }</span>
+
+<span style = "background-color:#fdd">    void XMLDocument::DeleteNode(XMLNode* node) {
+        TIXMLASSERT(node);
+        TIXMLASSERT(node-&gt;_document == this);
+        if (node-&gt;_parent) {
+            node-&gt;_parent-&gt;DeleteChild(node);
+        }</span>
+        else {
+            // Isn't in the tree.
+            // Use the parent delete.
+            // Also, we need to mark it tracked: we 'know'
+            // it was never used.
+<span style = "background-color:#fdd">            node-&gt;_memPool-&gt;SetTracked();</span>
+            // Call the static XMLNode version:
+<span style = "background-color:#fdd">            XMLNode::DeleteNode(node);</span>
+        }
+<span style = "background-color:#fdd">    }</span>
+
+
+    XMLError XMLDocument::LoadFile(const char* filename)
+<span style = "background-color:#fdd">    {
+        if (!filename) {
+            TIXMLASSERT(false);
+            SetError(XML_ERROR_FILE_COULD_NOT_BE_OPENED, 0, "filename=&lt;null&gt;");
+            return _errorID;</span>
+        }
+
+<span style = "background-color:#fdd">        Clear();
+        FILE* fp = callfopen(filename, "rb");
+        if (!fp) {
+            SetError(XML_ERROR_FILE_NOT_FOUND, 0, "filename=%s", filename);
+            return _errorID;</span>
+        }
+<span style = "background-color:#fdd">        LoadFile(fp);
+        fclose(fp);
+        return _errorID;
+    }</span>
+
+    XMLError XMLDocument::LoadFile(FILE* fp)
+<span style = "background-color:#fdd">    {
+        Clear();</span>
+
+<span style = "background-color:#fdd">        TIXML_FSEEK(fp, 0, SEEK_SET);
+        if (fgetc(fp) == EOF &amp;&amp; ferror(fp) != 0) {
+            SetError(XML_ERROR_FILE_READ_ERROR, 0, 0);
+            return _errorID;</span>
+        }
+
+<span style = "background-color:#fdd">        TIXML_FSEEK(fp, 0, SEEK_END);</span>
+
+        unsigned long long filelength;
+        {
+<span style = "background-color:#fdd">            const long long fileLengthSigned = TIXML_FTELL(fp);
+            TIXML_FSEEK(fp, 0, SEEK_SET);
+            if (fileLengthSigned == -1L) {
+                SetError(XML_ERROR_FILE_READ_ERROR, 0, 0);
+                return _errorID;</span>
+            }
+<span style = "background-color:#fdd">            TIXMLASSERT(fileLengthSigned &gt;= 0);
+            filelength = static_cast&lt;unsigned long long&gt;(fileLengthSigned);</span>
+        }
+
+<span style = "background-color:#fdd">        const size_t maxSizeT = static_cast&lt;size_t&gt;(-1);</span>
+        // We'll do the comparison as an unsigned long long, because that's guaranteed to be at
+        // least 8 bytes, even on a 32-bit platform.
+<span style = "background-color:#fdd">        if (filelength &gt;= static_cast&lt;unsigned long long&gt;(maxSizeT)) {</span>
+            // Cannot handle files which won't fit in buffer together with null terminator
+<span style = "background-color:#fdd">            SetError(XML_ERROR_FILE_READ_ERROR, 0, 0);
+            return _errorID;</span>
+        }
+
+<span style = "background-color:#fdd">        if (filelength == 0) {
+            SetError(XML_ERROR_EMPTY_DOCUMENT, 0, 0);
+            return _errorID;</span>
+        }
+
+<span style = "background-color:#fdd">        const size_t size = static_cast&lt;size_t&gt;(filelength);
+        TIXMLASSERT(_charBuffer == 0);
+        _charBuffer = new char[size + 1];
+        const size_t read = fread(_charBuffer, 1, size, fp);
+        if (read != size) {
+            SetError(XML_ERROR_FILE_READ_ERROR, 0, 0);
+            return _errorID;</span>
+        }
+
+<span style = "background-color:#fdd">        _charBuffer[size] = 0;</span>
+
+<span style = "background-color:#fdd">        Parse();
+        return _errorID;
+    }</span>
+
+
+    XMLError XMLDocument::SaveFile(const char* filename, bool compact)
+<span style = "background-color:#fdd">    {
+        if (!filename) {
+            TIXMLASSERT(false);
+            SetError(XML_ERROR_FILE_COULD_NOT_BE_OPENED, 0, "filename=&lt;null&gt;");
+            return _errorID;</span>
+        }
+
+<span style = "background-color:#fdd">        FILE* fp = callfopen(filename, "w");
+        if (!fp) {
+            SetError(XML_ERROR_FILE_COULD_NOT_BE_OPENED, 0, "filename=%s", filename);
+            return _errorID;</span>
+        }
+<span style = "background-color:#fdd">        SaveFile(fp, compact);
+        fclose(fp);
+        return _errorID;
+    }</span>
+
+
+    XMLError XMLDocument::SaveFile(FILE* fp, bool compact)
+<span style = "background-color:#fdd">    {</span>
+        // Clear any error from the last save, otherwise it will get reported
+        // for *this* call.
+<span style = "background-color:#fdd">        ClearError();
+        XMLPrinter stream(fp, compact);
+        Print(&amp;stream);
+        return _errorID;
+    }</span>
+
+
+    XMLError XMLDocument::Parse(const char* xml, size_t nBytes)
+<span style = "background-color:#fdd">    {
+        Clear();</span>
+
+<span style = "background-color:#fdd">        if (nBytes == 0 || !xml || !*xml) {
+            SetError(XML_ERROR_EMPTY_DOCUMENT, 0, 0);
+            return _errorID;</span>
+        }
+<span style = "background-color:#fdd">        if (nBytes == static_cast&lt;size_t&gt;(-1)) {
+            nBytes = strlen(xml);</span>
+        }
+<span style = "background-color:#fdd">        TIXMLASSERT(_charBuffer == 0);
+        _charBuffer = new char[nBytes + 1];
+        memcpy(_charBuffer, xml, nBytes);
+        _charBuffer[nBytes] = 0;</span>
+
+<span style = "background-color:#fdd">        Parse();
+        if (Error()) {</span>
+            // clean up now essentially dangling memory.
+            // and the parse fail can put objects in the
+            // pools that are dead and inaccessible.
+<span style = "background-color:#fdd">            DeleteChildren();
+            _elementPool.Clear();
+            _attributePool.Clear();
+            _textPool.Clear();
+            _commentPool.Clear();</span>
+        }
+<span style = "background-color:#fdd">        return _errorID;
+    }</span>
+
+
+    void XMLDocument::Print(XMLPrinter* streamer) const
+<span style = "background-color:#fdd">    {
+        if (streamer) {
+            Accept(streamer);
+        }</span>
+        else {
+<span style = "background-color:#fdd">            XMLPrinter stdoutStreamer(stdout);
+            Accept(&amp;stdoutStreamer);
+        }
+    }</span>
+
+
+<span style = "background-color:#fdd">    void XMLDocument::ClearError() {
+        _errorID = XML_SUCCESS;
+        _errorLineNum = 0;
+        _errorStr.Reset();
+    }</span>
+
+
+    void XMLDocument::SetError(XMLError error, int lineNum, const char* format, ...)
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(error &gt;= 0 &amp;&amp; error &lt; XML_ERROR_COUNT);
+        _errorID = error;
+        _errorLineNum = lineNum;
+        _errorStr.Reset();</span>
+
+<span style = "background-color:#fdd">        const size_t BUFFER_SIZE = 1000;
+        char* buffer = new char[BUFFER_SIZE];</span>
+
+<span style = "background-color:#fdd">        TIXMLASSERT(sizeof(error) &lt;= sizeof(int));
+        TIXML_SNPRINTF(buffer, BUFFER_SIZE, "Error=%s ErrorID=%d (0x%x) Line number=%d",</span>
+            ErrorIDToName(error), static_cast&lt;int&gt;(error), static_cast&lt;unsigned int&gt;(error), lineNum);
+
+<span style = "background-color:#fdd">        if (format) {
+            size_t len = strlen(buffer);
+            TIXML_SNPRINTF(buffer + len, BUFFER_SIZE - len, ": ");
+            len = strlen(buffer);</span>
+
+            va_list va;
+<span style = "background-color:#fdd">            va_start(va, format);
+            TIXML_VSNPRINTF(buffer + len, BUFFER_SIZE - len, format, va);
+            va_end(va);</span>
+        }
+<span style = "background-color:#fdd">        _errorStr.SetStr(buffer);
+        delete[] buffer;
+    }</span>
+
+
+    /*static*/ const char* XMLDocument::ErrorIDToName(XMLError errorID)
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(errorID &gt;= 0 &amp;&amp; errorID &lt; XML_ERROR_COUNT);
+        const char* errorName = _errorNames[errorID];
+        TIXMLASSERT(errorName &amp;&amp; errorName[0]);
+        return errorName;
+    }</span>
+
+    const char* XMLDocument::ErrorStr() const
+<span style = "background-color:#fdd">    {
+        return _errorStr.Empty() ? "" : _errorStr.GetStr();
+    }</span>
+
+
+    void XMLDocument::PrintError() const
+<span style = "background-color:#fdd">    {
+        printf("%s\n", ErrorStr());
+    }</span>
+
+    const char* XMLDocument::ErrorName() const
+<span style = "background-color:#fdd">    {
+        return ErrorIDToName(_errorID);
+    }</span>
+
+    void XMLDocument::Parse()
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(NoChildren()); // Clear() must have been called previously
+        TIXMLASSERT(_charBuffer);
+        _parseCurLineNum = 1;
+        _parseLineNum = 1;
+        char* p = _charBuffer;
+        p = XMLUtil::SkipWhiteSpace(p, &amp;_parseCurLineNum);
+        p = const_cast&lt;char*&gt;(XMLUtil::ReadBOM(p, &amp;_writeBOM));
+        if (!*p) {
+            SetError(XML_ERROR_EMPTY_DOCUMENT, 0, 0);
+            return;</span>
+        }
+<span style = "background-color:#fdd">        ParseDeep(p, 0, &amp;_parseCurLineNum);
+    }</span>
+
+    void XMLDocument::PushDepth()
+<span style = "background-color:#fdd">    {
+        _parsingDepth++;
+        if (_parsingDepth == TINYXML2_MAX_ELEMENT_DEPTH) {
+            SetError(XML_ELEMENT_DEPTH_EXCEEDED, _parseCurLineNum, "Element nesting is too deep.");</span>
+        }
+<span style = "background-color:#fdd">    }</span>
+
+    void XMLDocument::PopDepth()
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(_parsingDepth &gt; 0);
+        --_parsingDepth;
+    }</span>
+
+    XMLPrinter::XMLPrinter(FILE* file, bool compact, int depth) :
+<span style = "background-color:#fdd">        _elementJustOpened(false),
+        _stack(),
+        _firstElement(true),
+        _fp(file),
+        _depth(depth),
+        _textDepth(-1),
+        _processEntities(true),
+        _compactMode(compact),
+        _buffer()
+    {
+        for (int i = 0; i &lt; ENTITY_RANGE; ++i) {
+            _entityFlag[i] = false;
+            _restrictedEntityFlag[i] = false;
+        }
+        for (int i = 0; i &lt; NUM_ENTITIES; ++i) {
+            const char entityValue = entities[i].value;
+            const unsigned char flagIndex = static_cast&lt;unsigned char&gt;(entityValue);
+            TIXMLASSERT(flagIndex &lt; ENTITY_RANGE);
+            _entityFlag[flagIndex] = true;
+        }
+        _restrictedEntityFlag[static_cast&lt;unsigned char&gt;('&amp;')] = true;
+        _restrictedEntityFlag[static_cast&lt;unsigned char&gt;('&lt;')] = true;
+        _restrictedEntityFlag[static_cast&lt;unsigned char&gt;('&gt;')] = true;	// not required, but consistency is nice
+        _buffer.Push(0);
+    }</span>
+
+
+    void XMLPrinter::Print(const char* format, ...)
+<span style = "background-color:#fdd">    {</span>
+        va_list     va;
+<span style = "background-color:#fdd">        va_start(va, format);</span>
+
+<span style = "background-color:#fdd">        if (_fp) {
+            vfprintf(_fp, format, va);
+        }</span>
+        else {
+<span style = "background-color:#fdd">            const int len = TIXML_VSCPRINTF(format, va);</span>
+            // Close out and re-start the va-args
+<span style = "background-color:#fdd">            va_end(va);
+            TIXMLASSERT(len &gt;= 0);
+            va_start(va, format);
+            TIXMLASSERT(_buffer.Size() &gt; 0 &amp;&amp; _buffer[_buffer.Size() - 1] == 0);
+            char* p = _buffer.PushArr(len) - 1;	// back up over the null terminator.
+            TIXML_VSNPRINTF(p, len + 1, format, va);</span>
+        }
+<span style = "background-color:#fdd">        va_end(va);
+    }</span>
+
+
+    void XMLPrinter::Write(const char* data, size_t size)
+<span style = "background-color:#fdd">    {
+        if (_fp) {
+            fwrite(data, sizeof(char), size, _fp);
+        }</span>
+        else {
+<span style = "background-color:#fdd">            char* p = _buffer.PushArr(static_cast&lt;int&gt;(size)) - 1;   // back up over the null terminator.
+            memcpy(p, data, size);
+            p[size] = 0;</span>
+        }
+<span style = "background-color:#fdd">    }</span>
+
+
+    void XMLPrinter::Putc(char ch)
+<span style = "background-color:#fdd">    {
+        if (_fp) {
+            fputc(ch, _fp);
+        }</span>
+        else {
+<span style = "background-color:#fdd">            char* p = _buffer.PushArr(sizeof(char)) - 1;   // back up over the null terminator.
+            p[0] = ch;
+            p[1] = 0;</span>
+        }
+<span style = "background-color:#fdd">    }</span>
+
+
+    void XMLPrinter::PrintSpace(int depth)
+<span style = "background-color:#fdd">    {
+        for (int i = 0; i &lt; depth; ++i) {
+            Write("    ");
+        }
+    }</span>
+
+
+    void XMLPrinter::PrintString(const char* p, bool restricted)
+<span style = "background-color:#fdd">    {</span>
+        // Look for runs of bytes between entities to print.
+<span style = "background-color:#fdd">        const char* q = p;</span>
+
+<span style = "background-color:#fdd">        if (_processEntities) {
+            const bool* flag = restricted ? _restrictedEntityFlag : _entityFlag;
+            while (*q) {
+                TIXMLASSERT(p &lt;= q);</span>
+                // Remember, char is sometimes signed. (How many times has that bitten me?)
+<span style = "background-color:#fdd">                if (*q &gt; 0 &amp;&amp; *q &lt; ENTITY_RANGE) {</span>
+                    // Check for entities. If one is found, flush
+                    // the stream up until the entity, write the
+                    // entity, and keep looking.
+<span style = "background-color:#fdd">                    if (flag[static_cast&lt;unsigned char&gt;(*q)]) {
+                        while (p &lt; q) {
+                            const size_t delta = q - p;
+                            const int toPrint = (INT_MAX &lt; delta) ? INT_MAX : static_cast&lt;int&gt;(delta);
+                            Write(p, toPrint);
+                            p += toPrint;
+                        }
+                        bool entityPatternPrinted = false;
+                        for (int i = 0; i &lt; NUM_ENTITIES; ++i) {
+                            if (entities[i].value == *q) {
+                                Putc('&amp;');
+                                Write(entities[i].pattern, entities[i].length);
+                                Putc(';');
+                                entityPatternPrinted = true;
+                                break;</span>
+                            }
+<span style = "background-color:#fdd">                        }
+                        if (!entityPatternPrinted) {</span>
+                            // TIXMLASSERT( entityPatternPrinted ) causes gcc -Wunused-but-set-variable in release
+<span style = "background-color:#fdd">                            TIXMLASSERT(false);</span>
+                        }
+<span style = "background-color:#fdd">                        ++p;</span>
+                    }
+                }
+<span style = "background-color:#fdd">                ++q;
+                TIXMLASSERT(p &lt;= q);
+            }</span>
+            // Flush the remaining string. This will be the entire
+            // string if an entity wasn't found.
+<span style = "background-color:#fdd">            if (p &lt; q) {
+                const size_t delta = q - p;
+                const int toPrint = (INT_MAX &lt; delta) ? INT_MAX : static_cast&lt;int&gt;(delta);
+                Write(p, toPrint);</span>
+            }
+<span style = "background-color:#fdd">        }</span>
+        else {
+<span style = "background-color:#fdd">            Write(p);</span>
+        }
+<span style = "background-color:#fdd">    }</span>
+
+
+    void XMLPrinter::PushHeader(bool writeBOM, bool writeDec)
+<span style = "background-color:#fdd">    {
+        if (writeBOM) {</span>
+            static const unsigned char bom[] = { TIXML_UTF_LEAD_0, TIXML_UTF_LEAD_1, TIXML_UTF_LEAD_2, 0 };
+<span style = "background-color:#fdd">            Write(reinterpret_cast&lt;const char*&gt;(bom));</span>
+        }
+<span style = "background-color:#fdd">        if (writeDec) {
+            PushDeclaration("xml version=\"1.0\"");</span>
+        }
+<span style = "background-color:#fdd">    }</span>
+
+    void XMLPrinter::PrepareForNewNode(bool compactMode)
+<span style = "background-color:#fdd">    {
+        SealElementIfJustOpened();</span>
+
+<span style = "background-color:#fdd">        if (compactMode) {
+            return;</span>
+        }
+
+<span style = "background-color:#fdd">        if (_firstElement) {
+            PrintSpace(_depth);
+        }
+        else if (_textDepth &lt; 0) {
+            Putc('\n');
+            PrintSpace(_depth);</span>
+        }
+
+<span style = "background-color:#fdd">        _firstElement = false;
+    }</span>
+
+    void XMLPrinter::OpenElement(const char* name, bool compactMode)
+<span style = "background-color:#fdd">    {
+        PrepareForNewNode(compactMode);
+        _stack.Push(name);</span>
+
+<span style = "background-color:#fdd">        Write("&lt;");
+        Write(name);</span>
+
+<span style = "background-color:#fdd">        _elementJustOpened = true;
+        ++_depth;
+    }</span>
+
+
+    void XMLPrinter::PushAttribute(const char* name, const char* value)
+<span style = "background-color:#fdd">    {
+        TIXMLASSERT(_elementJustOpened);
+        Putc(' ');
+        Write(name);
+        Write("=\"");
+        PrintString(value, false);
+        Putc('\"');
+    }</span>
+
+
+    void XMLPrinter::PushAttribute(const char* name, int v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        PushAttribute(name, buf);
+    }</span>
+
+
+    void XMLPrinter::PushAttribute(const char* name, unsigned v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        PushAttribute(name, buf);
+    }</span>
+
+
+    void XMLPrinter::PushAttribute(const char* name, int64_t v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        PushAttribute(name, buf);
+    }</span>
+
+
+    void XMLPrinter::PushAttribute(const char* name, uint64_t v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        PushAttribute(name, buf);
+    }</span>
+
+
+    void XMLPrinter::PushAttribute(const char* name, bool v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        PushAttribute(name, buf);
+    }</span>
+
+
+    void XMLPrinter::PushAttribute(const char* name, double v)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(v, buf, BUF_SIZE);
+        PushAttribute(name, buf);
+    }</span>
+
+
+    void XMLPrinter::CloseElement(bool compactMode)
+<span style = "background-color:#fdd">    {
+        --_depth;
+        const char* name = _stack.Pop();</span>
+
+<span style = "background-color:#fdd">        if (_elementJustOpened) {
+            Write("/&gt;");
+        }</span>
+        else {
+<span style = "background-color:#fdd">            if (_textDepth &lt; 0 &amp;&amp; !compactMode) {
+                Putc('\n');
+                PrintSpace(_depth);</span>
+            }
+<span style = "background-color:#fdd">            Write("&lt;/");
+            Write(name);
+            Write("&gt;");</span>
+        }
+
+<span style = "background-color:#fdd">        if (_textDepth == _depth) {
+            _textDepth = -1;</span>
+        }
+<span style = "background-color:#fdd">        if (_depth == 0 &amp;&amp; !compactMode) {
+            Putc('\n');</span>
+        }
+<span style = "background-color:#fdd">        _elementJustOpened = false;
+    }</span>
+
+
+    void XMLPrinter::SealElementIfJustOpened()
+<span style = "background-color:#fdd">    {
+        if (!_elementJustOpened) {
+            return;</span>
+        }
+<span style = "background-color:#fdd">        _elementJustOpened = false;
+        Putc('&gt;');
+    }</span>
+
+
+    void XMLPrinter::PushText(const char* text, bool cdata)
+<span style = "background-color:#fdd">    {
+        _textDepth = _depth - 1;</span>
+
+<span style = "background-color:#fdd">        SealElementIfJustOpened();
+        if (cdata) {
+            Write("&lt;![CDATA[");
+            Write(text);
+            Write("]]&gt;");
+        }</span>
+        else {
+<span style = "background-color:#fdd">            PrintString(text, true);</span>
+        }
+<span style = "background-color:#fdd">    }</span>
+
+
+    void XMLPrinter::PushText(int64_t value)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(value, buf, BUF_SIZE);
+        PushText(buf, false);
+    }</span>
+
+
+    void XMLPrinter::PushText(uint64_t value)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(value, buf, BUF_SIZE);
+        PushText(buf, false);
+    }</span>
+
+
+    void XMLPrinter::PushText(int value)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(value, buf, BUF_SIZE);
+        PushText(buf, false);
+    }</span>
+
+
+    void XMLPrinter::PushText(unsigned value)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(value, buf, BUF_SIZE);
+        PushText(buf, false);
+    }</span>
+
+
+    void XMLPrinter::PushText(bool value)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(value, buf, BUF_SIZE);
+        PushText(buf, false);
+    }</span>
+
+
+    void XMLPrinter::PushText(float value)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(value, buf, BUF_SIZE);
+        PushText(buf, false);
+    }</span>
+
+
+    void XMLPrinter::PushText(double value)
+<span style = "background-color:#fdd">    {</span>
+        char buf[BUF_SIZE];
+<span style = "background-color:#fdd">        XMLUtil::ToStr(value, buf, BUF_SIZE);
+        PushText(buf, false);
+    }</span>
+
+
+    void XMLPrinter::PushComment(const char* comment)
+<span style = "background-color:#fdd">    {
+        PrepareForNewNode(_compactMode);</span>
+
+<span style = "background-color:#fdd">        Write("&lt;!--");
+        Write(comment);
+        Write("--&gt;");
+    }</span>
+
+
+    void XMLPrinter::PushDeclaration(const char* value)
+<span style = "background-color:#fdd">    {
+        PrepareForNewNode(_compactMode);</span>
+
+<span style = "background-color:#fdd">        Write("&lt;?");
+        Write(value);
+        Write("?&gt;");
+    }</span>
+
+
+    void XMLPrinter::PushUnknown(const char* value)
+<span style = "background-color:#fdd">    {
+        PrepareForNewNode(_compactMode);</span>
+
+<span style = "background-color:#fdd">        Write("&lt;!");
+        Write(value);
+        Putc('&gt;');
+    }</span>
+
+
+    bool XMLPrinter::VisitEnter(const XMLDocument&amp; doc)
+<span style = "background-color:#fdd">    {
+        _processEntities = doc.ProcessEntities();
+        if (doc.HasBOM()) {
+            PushHeader(true, false);</span>
+        }
+<span style = "background-color:#fdd">        return true;
+    }</span>
+
+
+    bool XMLPrinter::VisitEnter(const XMLElement&amp; element, const XMLAttribute* attribute)
+<span style = "background-color:#fdd">    {
+        const XMLElement* parentElem = 0;
+        if (element.Parent()) {
+            parentElem = element.Parent()-&gt;ToElement();</span>
+        }
+<span style = "background-color:#fdd">        const bool compactMode = parentElem ? CompactMode(*parentElem) : _compactMode;
+        OpenElement(element.Name(), compactMode);
+        while (attribute) {
+            PushAttribute(attribute-&gt;Name(), attribute-&gt;Value());
+            attribute = attribute-&gt;Next();
+        }
+        return true;
+    }</span>
+
+
+    bool XMLPrinter::VisitExit(const XMLElement&amp; element)
+<span style = "background-color:#fdd">    {
+        CloseElement(CompactMode(element));
+        return true;
+    }</span>
+
+
+    bool XMLPrinter::Visit(const XMLText&amp; text)
+<span style = "background-color:#fdd">    {
+        PushText(text.Value(), text.CData());
+        return true;
+    }</span>
+
+
+    bool XMLPrinter::Visit(const XMLComment&amp; comment)
+<span style = "background-color:#fdd">    {
+        PushComment(comment.Value());
+        return true;
+    }</span>
+
+    bool XMLPrinter::Visit(const XMLDeclaration&amp; declaration)
+<span style = "background-color:#fdd">    {
+        PushDeclaration(declaration.Value());
+        return true;
+    }</span>
+
+
+    bool XMLPrinter::Visit(const XMLUnknown&amp; unknown)
+<span style = "background-color:#fdd">    {
+        PushUnknown(unknown.Value());
+        return true;
+    }</span>
+
+}   // namespace tinyxml2</pre>
+        <hr />
+        <table width="100%">
+            <thead>
+                <tr>
+                    <th align="center">
+                        <small>Generated by</small>
+                        <a href="https://github.com/OpenCppCoverage/OpenCppCoverage/releases">
+                            <strong>OpenCppCoverage (Version: 0.9.9.0)</strong>
+                        </a>
+                    </th>
+                </tr>
+            </thead>
+        </table>
+    </body>
+</html>
